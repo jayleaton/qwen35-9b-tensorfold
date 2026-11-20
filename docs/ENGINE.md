@@ -8,6 +8,7 @@ series applied in order where it has one. The pin, the series and the resulting 
 | `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0027` | `9bac6ecbdef1c03861d824e930799edcb3b3de16` | DGX Spark |
 | `rtx` | same | `cuda:0022 rtx:0003` | `64ba7d4085cc4742c127af91fa196218b189bdbf` | 16 GB RTX |
 | `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0044` | `d33e2d93ea37f0b3ed1f208599a24ac00b3de16e` | Macs |
+| `hip` | `813ff4ccbf9d6610e991a96d53fda2b628f56347` | none | `f70d190f1d1bd65575a53f7eb06838c7acf97cfc` | Ally X ([HIP](HIP.md)), pending device run |
 | `upstream` | `727153cb33876173efb256d60a12e69413cf1248` | none | `c4e66e4220a8c650d1d94b0fdda4906d6dced988` | control |
 
 Every repo is `https://github.com/ashhart/TensorFold.git`. `scripts/fetch-engine.sh CONFIG DEST [SOURCE]` fetches the

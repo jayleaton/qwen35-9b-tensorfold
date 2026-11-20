@@ -40,3 +40,11 @@
 - **No physical 16 GB Mac was tested.** The 16 GB rows are the Studio and the M4 Pro under a 16 GB working-set cap.
 - **Metal and CUDA greedy replies differ on long outputs** (different kernels): HumanEval+ 87.8 on the Studio and 89.6
   on the M4 Pro against 89.6 on the Spark, with the same weights.
+
+## HIP
+
+- **The Ally X has no device numbers yet.** Its GPU hung after a live change to the TTM memory limits (made while the
+  driver was loaded, the day before this recipe's runs); the same limits are now persisted on the kernel command line
+  and take effect at the next boot. Every device run waits on that reboot. Whether the hang came from the live change
+  or recurs at the persisted limits is open until the first run after it.
+- `scripts/build-engine.sh` has no HIP target; build with the `zig build` line in [HIP](HIP.md).
