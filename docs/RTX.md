@@ -101,6 +101,10 @@ is `7497f67bb53103c998de033d6d6beec4ee84b8f121931383718ecbfb823b2a0a` (8,255,878
 - The script does not pass `--no_swap`: on a 16 GB card `lm_head` runs out of memory without swapping weights to host.
 - A stopped run resumes from `OUT.work`. exllamav3 then records the resumed run's `--out_scales` as `auto` in the
   pack's `config.json` and `quantization_config.json`; the tensors still carry their output scales.
+- The script itself was checked end to end on a DGX Spark (`SM=121`, a fresh venv): 47 minutes, `"method":
+  "exllamav3-native"`, 8,255,878,403 bytes. exllamav3 is not bit-reproducible across GPUs, so its sha256 differs from
+  the card's pack, but its teacher-forced logits match: cosine 0.99976 and top-1 235/236 against BF16, beside the
+  card-made pack's 0.99979 and 236/236 on the same binary.
 - `4.0` and `5.0` work the same way. Their fidelity is in [CUDA](CUDA.md#fidelity); they were not run on the card.
 
 ## Serve
