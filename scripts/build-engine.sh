@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Fetch and patch one backend's engine (scripts/fetch-engine.sh), then build tensorfold-native in it.
+#
+#   scripts/build-engine.sh cuda DEST [SOURCE]     on a DGX Spark; NVCC (default /usr/local/cuda/bin/nvcc) builds the kernels
+#   scripts/build-engine.sh metal DEST [SOURCE]    on Apple Silicon with Xcode's macOS SDK and Metal toolchain
+#   scripts/build-engine.sh rtx DEST [SOURCE]      an RTX card: the CUDA series plus EXL3, kernels for SM (default 120)
+#   scripts/build-engine.sh upstream DEST [SOURCE] upstream main with no patches: Metal on macOS, CUDA elsewhere
+#
+# NVCC=none builds the CUDA side's host code without kernel images (a source check on a machine without CUDA).
+# XGRAMMAR=DIR also builds libtfgrammar beside the server (required and named tool calls, response_format) from an
+# xgrammar v0.2.8 checkout: git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar DIR
+set -euo pipefail
+backend=${1:?usage: scripts/build-engine.sh cuda|metal|rtx|upstream DEST [SOURCE]}
+dest=${2:?usage: scripts/build-engine.sh cuda|metal|rtx|upstream DEST [SOURCE]}
+root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+"$root/scripts/fetch-engine.sh" "$@"
+want=$(cat "$dest/.zig-version")
+have=$(zig version)
+[[ "$have" == "$want" ]] || { echo "zig $have found; the engine needs zig $want (.zig-version)" >&2; exit 2; }
+cd "$dest"
+[[ "$backend" == upstream ]] && { [[ "$(uname -s)" == Darwin ]] && backend=metal || backend=cuda; }
+case "$backend" in
+    cuda)
+        nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
+        if [[ "$nvcc" == none ]]; then
+            zig build native
+        else
+            zig build native -Dnvcc="$nvcc"
+            zig build qwen35-cuda -Dnvcc="$nvcc"
+        fi
+        ;;
+    metal) zig build native -Dcpu=apple_m1 ;;
+    rtx)
+        nvcc=${NVCC:-/usr/local/cuda/bin/nvcc}
+        zig build native -Dsm="${SM:-120}" -Dnvcc="$nvcc"
+        zig build qwen35-cuda -Dsm="${SM:-120}" -Dnvcc="$nvcc"
+        ;;
+    *) echo "no build for $backend" >&2; exit 2 ;;
+esac
+if [[ -n "${XGRAMMAR:-}" ]]; then
+    zig build grammar -Dxgrammar="$(cd "$XGRAMMAR" && pwd)"
+fi
+echo "built $dest/zig-out/native/bin/tensorfold-native"

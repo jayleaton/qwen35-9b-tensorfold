@@ -1,0 +1,39 @@
+sensenova-loop9b-tensorfold
+Copyright 2026 Jay Leaton (https://x.com/jayleaton)
+
+This project's scripts, configs, patches and documentation are licensed under the Apache License, Version 2.0 (see
+LICENSE). If you redistribute this project or a modified version of it, keep this NOTICE file and the copyright line
+above, and state what you changed (Apache-2.0, section 4).
+
+This project builds on third-party work that keeps its own license:
+
+TensorFold
+  https://github.com/ashhart/TensorFold
+  Fetched at build time at the commits in config/*/tensorfold.rev; not included
+  here. The files in patches/ are modifications of TensorFold source. The changes are this project's work under
+  Apache-2.0; the TensorFold code they modify, and quote as diff context, stays under TensorFold's license, so keep
+  TensorFold's copyright and permission notices with any copy of a patched tree. TensorFold's NOTICE, reproduced
+  verbatim:
+  ------------------------------------------------------------------------------------------------------------------
+  TensorFold
+  Copyright 2026 TensorFold contributors
+  https://github.com/ashhart/TensorFold
+
+  TensorFold is licensed under the Apache License, Version 2.0 (LICENSE) from 0.6.0.
+  Releases up to 0.5.0 were MIT-licensed, and code written before 0.6.0 keeps its
+  MIT notice in LICENSES/MIT.txt. Third-party code and its licenses are listed in
+  THIRD_PARTY_NOTICES.md.
+  ------------------------------------------------------------------------------------------------------------------
+
+Qwen3.5-9B
+  https://huggingface.co/Qwen/Qwen3.5-9B (revision c202236235762e1c871ad0ccb60c8ee5ba337b9a)
+  By the Qwen team, Apache License 2.0. Not included: each user downloads the checkpoint under the terms on its model
+  card. The docs describe the model's architecture as published in its config.
+
+Also credited, not included:
+  - The SenseNova-Loop-9B recipe (https://github.com/jayleaton/sensenova-loop9b-tensorfold), Apache License 2.0: the
+    patch series and scripts reused here.
+  - Upstream TensorFold PR #2475 by jrb-ai (https://github.com/jrb-ai): shared-round drafter pricing.
+  - exllamav3 by turboderp (https://github.com/turboderp-org/exllamav3), MIT: the EXL3 format and quantizer.
+  - QTIP (https://github.com/Cornell-RelaxML/qtip), GPL-3.0: the trellis-coded quantization EXL3 builds on.
+  - xgrammar (https://github.com/mlc-ai/xgrammar), Apache License 2.0: built by the user as libtfgrammar.
