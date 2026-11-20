@@ -33,7 +33,7 @@ Each row was built and run end to end. Every build checks the exact engine tree 
 
 | device | weights | engine (`config/`) | speed | quality | limits |
 | --- | --- | --- | --- | --- | --- |
-| **DGX Spark** (GB10, 128 GB) | 4-bit MLX g64 (`q9-q4`) | `cuda`: pin `038e4a278` + `patches/cuda` `0001`-`0027` | decode 46.4 tok/s, 41.1 after 30K; 8 chats 291, 16 chats 479 tok/s aggregate; copy drafts: re-quote 1,447, code edit 865 tok/s; a 95K prompt's next turn in 0.54 s (host RAM) or 1.87 s after a restart (NVMe) | HumanEval+ 89.0-89.6, BFCL held-out 83.8; top-1 222/236 against BF16 | images not covered |
+| **DGX Spark** (GB10, 128 GB) | 4-bit MLX g64 (`q9-q4`) | `cuda`: pin `038e4a278` + `patches/cuda` `0001`-`0027` | decode 46.4 tok/s, 41.1 after 30K; 8 chats 291, 16 chats 479 tok/s aggregate; copy drafts: re-quote 1,447, code edit 865 tok/s; a 95K prompt's next turn in 0.54 s (host RAM) or 1.87 s after a restart (NVMe) | HumanEval+ 89.0-89.6, BFCL held-out 83.8; top-1 222/236 against BF16; 30-minute soak, 857 requests, 0 failures | images not covered |
 | **RTX 5070 Ti 16 GB** (WSL2) | EXL3 | `rtx`: pin `038e4a278` + `patches/cuda` `0001`-`0022` + `patches/rtx` `0001`-`0002` | pending | pending | pending |
 | **Mac Studio M5 Ultra** | `q9-q4` | `metal`: pin `6d0a128b0` + `patches/metal` `0001`-`0044` | pending | pending | pending |
 | **16 GB Mac** | `q9-q4` | `metal` | pending | | |

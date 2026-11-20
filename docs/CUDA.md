@@ -62,7 +62,7 @@ Prompts above 1K tokens are Python standard-library source. Every drafted reply 
 | NVMe tier, the same prompt after a restart | **1.87 s**: 94,208 tokens read from disk (1,544 MiB in 1.26 s); reply identical to the first boot's |
 | memory | host MemAvailable fell by 45 GiB at peak (default profile, 36 GiB reserve included), 25 GiB with `batch` |
 | shutdown (SIGINT) | drains in 1-5 s, exit 0, no process left |
-| soak, 30 minutes, 4 chats of mixed requests | see below |
+| soak, 30 minutes, 4 chats of mixed requests | **857 requests, 0 failures** (chat, stream, tool calls `auto` and `required`, coding with thinking, 8K-token summaries); RSS 0.77 GiB after warm-up, 0.80 at the end; MemAvailable flat (77.8 to 77.6 GiB) |
 
 `q9-q8` (8-bit, 9.44 GiB): 25.2 tok/s at 21 tokens, 23.5 after 30,209, about 87 aggregate at 4 chats; drafted and
 plain identical.
