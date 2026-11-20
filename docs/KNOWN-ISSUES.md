@@ -11,7 +11,7 @@
   were not checked for this checkpoint.
 - **Benchmark replies are not bit-stable across serving flags.** Greedy replies are identical across drafts on or off
   and across parallel widths, and the `cuda` build reproduces the serving study's replies under its flags; the fp8 KV
-  cache in the recipe profiles changes some tokens (HumanEval+ 89.0 against 89.6, BFCL held 83.8 against 82.4).
+  cache in the recipe profiles changes some tokens (HumanEval+ 89.0-89.6 against 89.6, BFCL held 83.8 against 82.4).
 
 ## CUDA
 

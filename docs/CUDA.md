@@ -91,12 +91,13 @@ at once. References are stock Qwen3.5-9B q4 in the study (same engine tree, its 
 
 | check | this recipe (`batch` profile) | study reference |
 | --- | ---: | ---: |
-| HumanEval+ 164, thinking budget 1024 | **146/164 = 89.0** | 147/164 = 89.6 |
+| HumanEval+ 164, thinking budget 1024 | **146-147/164 = 89.0-89.6** | 147/164 = 89.6 |
 | BFCL v4 held-out 450, thinking budget 512 | **377/450 = 83.8** | 371/450 = 82.4 |
 
 With the study's own server flags (`--context 33024 --parallel 16 --prompt-cache-gib 0`, bf16 KV) this build and tree
 reproduce the study's 164 HumanEval+ replies token for token. The recipe profile's fp8 KV cache changes tokens (9 of
-164 replies are identical) without moving the score.
+164 replies are identical) without moving the score. The same 164 replies scored 146 once and 147 once: one
+HumanEval+ test is timing-dependent. Upstream main gave the same 614 replies as `cuda`, token for token.
 
 ## Upstream main
 
