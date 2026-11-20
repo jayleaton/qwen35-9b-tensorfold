@@ -46,7 +46,7 @@ win; the benchmark spot checks send `temperature: 0`.
 | `linear_attn.conv1d.weight` `[qkv, 1, kernel]` | `[qkv, kernel, 1]` |
 | `A_log`, `dt_bias` (f32) | bf16 |
 | `model.visual.*` | `vision_tower.*`, 333 tensors in bf16, unquantized; the CUDA text engine does not load them |
-| `mtp.*` | left out (`metal` 0035): no engine here drafts with a dense MTP head |
+| `mtp.*` | left out (`metal` 0035): no engine in the recipe drafts with a dense MTP head ([CUDA](CUDA.md#follow-up-mtp-drafting)) |
 
 | tree | tensors | on disk |
 | --- | ---: | ---: |

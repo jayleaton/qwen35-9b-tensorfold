@@ -6,7 +6,7 @@ series applied in order where it has one. The pin, the series and the resulting 
 | config | pin (`tensorfold.rev`) | series (`tensorfold.series` / `.patches`) | `tensorfold.tree` | devices |
 | --- | --- | --- | --- | --- |
 | `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0027` | `9bac6ecbdef1c03861d824e930799edcb3b3de16` | DGX Spark |
-| `rtx` | same | `cuda:0022 rtx:0002` | `0f61f4723db864b510f9a278b6dd5d679b344acb` | 16 GB RTX |
+| `rtx` | same | `cuda:0022 rtx:0003` | `64ba7d4085cc4742c127af91fa196218b189bdbf` | 16 GB RTX |
 | `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0044` | `d33e2d93ea37f0b3ed1f208599a24ac00b3de16e` | Macs |
 | `upstream` | `727153cb33876173efb256d60a12e69413cf1248` | none | `c4e66e4220a8c650d1d94b0fdda4906d6dced988` | control |
 
@@ -20,9 +20,9 @@ builds `libtfgrammar`.
 ## Why these series for a stock checkpoint
 
 The series were written for [SenseNova-Loop-9B](https://github.com/jayleaton/sensenova-loop9b-tensorfold), a looped
-Qwen3.5-9B. They are reused byte for byte, so each config rebuilds a tree that has already been checked. Their loop and
-mHC code runs only for a checkpoint with `loop_settings`; stock Qwen3.5-9B has none and takes the plain `qwen3_5`
-path. What the stock model uses from them:
+Qwen3.5-9B. They are reused byte for byte (`rtx` `0003` is the one patch added here), so the `cuda` and `metal` trees
+are ones already checked there. Their loop and mHC code runs only for a checkpoint with `loop_settings`; stock
+Qwen3.5-9B has none and takes the plain `qwen3_5` path. What the stock model uses from them:
 
 | patches | what stock Qwen3.5-9B gets | on upstream `main` (`727153cb3`) |
 | --- | --- | --- |
@@ -33,6 +33,7 @@ path. What the stock model uses from them:
 | `cuda` `0017`-`0022` | copy drafts in shared rounds: windows start narrow and widen as copies land, and copy rows fill the backend's 16-row tile split by acceptance | `0017`-`0019` apply cleanly; `0020`-`0022` conflict |
 | `cuda` `0024`-`0027` | the one-barrier kv8 prompt attention (same bits) | not there |
 | `rtx` `0001`, `0002` | the EXL3 capability list compiles and keeps Qwen's decisions; `cuda.zig` back to 600 lines | not there |
+| `rtx` `0003` | new for this recipe, tools only: `exl3_attach_sensenova.py attach --method` records `exllamav3-native` calibration ([RTX](RTX.md#quantize)) | not there |
 | `cuda` `0008`, `metal` `0002`, `0004`, `0035`, `0037` | the converter, `tools/sensenova_loop_mlx.py` | no Qwen3.5 converter in `tools/` |
 | `metal` `0034` | a startup margin that scales with the working set (16 GB Macs) | |
 | `metal` `0040`-`0043` | macOS 26 (MSL 4.0) compiles the library; lone streams propose copy drafts; copy drafts on by default | |

@@ -1,1 +1,1 @@
---context 33024 --parallel 4 --prompt-cache-gib 0
+--context 65536 --parallel 4 --thinking-budget 2048

@@ -1,1 +1,1 @@
---parallel 1 --kv-cache fp8 --context 212992 --prompt-cache-gib 0
+--parallel 1 --kv-cache fp8 --context 262144 --thinking-budget 2048 --prompt-cache-gib 8 --spill-gib 64

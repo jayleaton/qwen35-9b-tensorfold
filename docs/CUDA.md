@@ -81,8 +81,9 @@ Teacher-forced logits from `tf-qwen35-cuda MODEL step IDS OUT` on three fixed pr
 | EXL3 4.0 bpw | 0.99762 | 0.9843 | 231/236 | 4.74 |
 
 The `cuda` and `rtx` binaries give bit-identical BF16 and q4 logits, and the `metal` converter's `q9-q4` gives
-bit-identical logits to the `cuda` converter's tree (f32 gated norm, MTP kept) on all three prompts. q4 loses the most per token, yet with thinking on
-it scores as well as q8 on the benchmarks below and in the study behind them (q4 to q8: +0.5 BFCL, +1.8 HumanEval+).
+bit-identical logits to the `cuda` converter's tree (f32 gated norm, MTP kept) on all three prompts. q4 loses the most
+per token, yet with thinking on it scores as well as q8 on the benchmarks below and in the study behind them (q4 to q8:
++0.5 BFCL, +1.8 HumanEval+).
 
 ## Quality
 
@@ -116,3 +117,31 @@ HumanEval+ test is timing-dependent. Upstream main gave the same 614 replies as 
 
 Upstream main serves this model on a Spark with the converted tree, at the same speed and with the same greedy
 replies. What it lacks for this recipe is the long-prompt disk tier and the EXL3 packs.
+
+## Follow-up: MTP drafting
+
+Measured, not shipped. The checkpoint carries one MTP layer (15 `mtp.*` tensors, BF16). No released TensorFold drafts
+with it over a dense `qwen3_5` target: CUDA opens MTP drafting for MoE targets only. Upstream draft PR
+[#3867](https://github.com/ashhart/TensorFold/pull/3867) (issue [#3858](https://github.com/ashhart/TensorFold/issues/3858))
+adds a dense BF16 MTP drafter for SenseNova-Loop-9B. For this measurement its head (`123bbd474`) was built with its
+SenseNova-only gates widened to any dense, non-EXL3 `qwen3_5` target (four files, 7 lines), and served `q9-q4` with the
+checkpoint's MTP tensors saved beside it as `mtp.safetensors`. The banner reads `drafts: MTP (...) + copies`. Same
+Spark, same flags as the default profile, greedy:
+
+| check | MTP + copies | copies only (same binary) |
+| --- | ---: | ---: |
+| decode, 21-token prompt | **63.6 tok/s** | 46.1 |
+| decode after a 30,209-token prompt | **59.7** | 41.2 |
+| 1 chat / 4 chats aggregate | **62.7 / 198.1** | 45.8 / 161.9 |
+| copy drafts: re-quote / code edit | 1,185 / 883 | 1,441 / 866 |
+| free prose | **69.5** | 46.0 |
+| HumanEval+ 164, budget 1024, 16 at once | 147/164 = 89.6, **303 s** | 147/164 = 89.6, 387 s |
+| server ready | 20.1 s | 6.9 s |
+
+Every drafted reply equals its `"draft": false` reply, and the 164 HumanEval+ replies are token-identical across MTP,
+copies only and this recipe's `cuda` build. On HumanEval+ the MTP head's drafts were accepted 69% of the time (123,079
+of 178,132 tokens); copy drafts alone 20% (66,476 of 339,215). MTP adds about 38% to one chat's decode and 22% to
+the 4-chat aggregate, and costs 18% on long re-quotes, where copy drafts already win.
+
+It is not in the recipe because the drafter is an unmerged draft PR built for another checkpoint, and the widened gates
+are a local change. When upstream TensorFold drafts with a dense `qwen3_5` MTP head, this becomes a recipe row.

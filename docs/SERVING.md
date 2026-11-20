@@ -1,8 +1,8 @@
 # Serving: thinking budgets, sampling and parallel requests
 
 The defaults come from a study of 9B Qwen3.5 models served on TensorFold on a DGX Spark (stock Qwen3.5-9B q4 unless
-stated, greedy for benchmarks): HumanEval+ and MBPP+ with thinking on, BFCL v4 tool calls, and OpenCode agentic workflows graded
-by running what the model built.
+stated, greedy for benchmarks): HumanEval+ and MBPP+ with thinking on, BFCL v4 tool calls, and OpenCode agentic
+workflows graded by running what the model built.
 
 ## Thinking budget
 

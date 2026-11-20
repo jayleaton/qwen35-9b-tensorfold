@@ -1,0 +1,50 @@
+From 7650b5c0f24dd3b35d11db67058cb193d27c7203 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Fri, 20 Nov 2026 09:14:08 +0700
+Subject: [PATCH] exl3: attach records how the converter calibrated, so a stock
+ pack traced by exllamav3 says so
+
+---
+ tools/exl3_attach_sensenova.py | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/tools/exl3_attach_sensenova.py b/tools/exl3_attach_sensenova.py
+index 7b6bd76..cc05309 100644
+--- a/tools/exl3_attach_sensenova.py
++++ b/tools/exl3_attach_sensenova.py
+@@ -99,7 +99,7 @@ def source_tensors(source: str):
+     return found
+ 
+ 
+-def attach(source: str, converted: str, recipe: str | None, cal_rows: int, cal_cols: int):
++def attach(source: str, converted: str, recipe: str | None, cal_rows: int, cal_cols: int, method: str):
+     """SenseNova's config, extras shard, tokenizer and an index that names the extras; then the report."""
+     extras = source_tensors(source)
+     if extras:
+@@ -112,7 +112,7 @@ def attach(source: str, converted: str, recipe: str | None, cal_rows: int, cal_c
+     if "quantization_config" not in converted_config:
+         raise SystemExit(f"{converted}: no quantization_config; did convert_model.py finish?")
+     qa = dict(converted_config["quantization_config"])
+-    qa["calibration"] = {"rows": cal_rows, "cols": cal_cols, "method": "sensenova-loop-hessian"}
++    qa["calibration"] = {"rows": cal_rows, "cols": cal_cols, "method": method}
+     config = read_json(os.path.join(source, "config.json"))
+     config["quantization_config"] = qa
+     if recipe:
+@@ -174,11 +174,13 @@ def main() -> int:
+     done.add_argument("--recipe", default=None, help="the recipe name to record in config.json (sn-5.0, st-4.0, ...)")
+     done.add_argument("--cal-rows", type=int, default=250)
+     done.add_argument("--cal-cols", type=int, default=2048)
++    done.add_argument("--method", default="sensenova-loop-hessian",
++                      help="how the converter calibrated: sensenova-loop-hessian (--hessians) or exllamav3-native")
+     args = parser.parse_args()
+     if args.command == "shim":
+         shim(args.source, args.out, args.force)
+     else:
+-        attach(args.source, args.converted, args.recipe, args.cal_rows, args.cal_cols)
++        attach(args.source, args.converted, args.recipe, args.cal_rows, args.cal_cols, args.method)
+     return 0
+ 
+ 
+-- 
+2.43.0
+

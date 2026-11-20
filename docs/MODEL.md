@@ -26,10 +26,11 @@ length.
 | --- | ---: | ---: |
 | `q9-q4` (MLX affine 4-bit g64, vision tower carried in bf16) | 5.96 GB | 5.27 GiB on CUDA (text only) |
 | `q9-q8` (8-bit g64) | 10.44 GB | 9.44 GiB on CUDA |
-| EXL3 4.0 / 5.0 / 6.0 bpw ([RTX](RTX.md)) | 6.30 / 7.16 / 8.28 GB | 6.43 GiB (4.0) |
+| EXL3 4.0 / 5.0 / 6.0 bpw ([RTX](RTX.md)) | 6.30 / 7.16 / 8.28 GB | 6.43 GiB (4.0), 8.28 GiB (6.0) |
 
 ## Drafting
 
 The checkpoint ships an MTP head, but none of the engines in this recipe drafts with a dense target's MTP head (CUDA
-opens MTP only over an MoE target; the Metal `qwen27` engine has no MTP drafter). Copy drafts, which draft from a
+opens MTP only over an MoE target; the Metal `qwen27` engine has no MTP drafter). An upstream draft PR's drafter was
+measured with it: [CUDA](CUDA.md#follow-up-mtp-drafting). Copy drafts, which draft from a
 chat's own context and need no extra weights, are on by default everywhere. See [KNOWN-ISSUES](KNOWN-ISSUES.md).
