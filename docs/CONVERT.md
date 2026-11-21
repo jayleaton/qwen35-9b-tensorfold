@@ -46,9 +46,26 @@ win; the benchmark spot checks send `temperature: 0`.
 | `linear_attn.conv1d.weight` `[qkv, 1, kernel]` | `[qkv, kernel, 1]` |
 | `A_log`, `dt_bias` (f32) | bf16 |
 | `model.visual.*` | `vision_tower.*`, 333 tensors in bf16, unquantized; the CUDA text engine does not load them |
-| `mtp.*` | left out (`metal` 0035): no engine in the recipe drafts with a dense MTP head ([CUDA](CUDA.md#follow-up-mtp-drafting)) |
+| `mtp.*` | left out of the shards (`metal` 0035); `scripts/mtp-head.sh` saves the head beside the tree ([below](#the-mtp-head)) |
 
 | tree | tensors | on disk |
 | --- | ---: | ---: |
 | `q9-q4` | 1,260 | 5.96 GB |
 | `q9-q8` | 1,260 | 10.44 GB |
+
+## The MTP head
+
+The checkpoint carries one MTP layer: 15 `mtp.*` tensors in BF16. The `cuda` build drafts with it
+([CUDA](CUDA.md#mtp-drafting)). Save it beside the tree:
+
+```bash
+scripts/mtp-head.sh Qwen3.5-9B q9-q4      # writes q9-q4/mtp.safetensors, 486,582,880 bytes, in a few seconds
+```
+
+The script copies the tensors' bytes as shipped, using Python's standard library only, so the file is the same on
+every machine: sha256 `1ea4b4ec525e67cd7bc63de20dddca18248ef22ef2d3f2987eec6eb54a36d896`. The tree's shards and
+`model.safetensors.index.json` are not touched. TensorFold finds a tree's shards through its index, so an engine that
+does not draft with MTP does not open the file: the previous `cuda` build (`0027`) served the tree with the file
+beside it at the same speed and banner. The `cuda` build's MTP loader (`cuda` 0030) finds the file and quantizes the
+head to affine-4 tables at load.
+

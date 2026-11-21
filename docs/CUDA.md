@@ -1,8 +1,9 @@
 # DGX Spark (CUDA)
 
 Measured on DGX Spark-class GB10 machines (128 GB unified memory, Ubuntu 24.04, driver 580, CUDA 13.0, Zig 0.17.0) on
-2026-11-20, with `config/cuda/`: upstream TensorFold `038e4a278` + `patches/cuda/` `0001`-`0027`, tree
-`9bac6ecbdef1`.
+2026-11-20 and 2026-11-21, with `config/cuda/`: upstream TensorFold `038e4a278` + `patches/cuda/` `0001`-`0031`, tree
+`10b9ba30123f`. Sections before [MTP drafting](#mtp-drafting) were measured with `0001`-`0027` (tree `9bac6ecbdef1`),
+copy drafts only; `0028`-`0031` add MTP drafting and leave those numbers unchanged when it is off.
 
 ## Build
 
@@ -23,6 +24,7 @@ toolchain.
 
 ```bash
 scripts/fetch-engine.sh metal engine-metal && scripts/convert.sh engine-metal Qwen3.5-9B q9-q4 4   # see CONVERT
+scripts/mtp-head.sh Qwen3.5-9B q9-q4                    # the MTP head beside the tree (MTP drafting)
 scripts/serve.sh cuda engine-cuda q9-q4                 # 8 chats, 262,144-token window, port 8090
 PROFILE=batch scripts/serve.sh cuda engine-cuda q9-q4   # 16 chats at a 65,536-token window, for batch work
 ```
@@ -33,7 +35,7 @@ PROFILE=batch scripts/serve.sh cuda engine-cuda q9-q4   # 16 chats at a 65,536-t
 | `batch` | the same with `--parallel 16 --context 65536` |
 
 Both export `TENSORFOLD_MEMORY_RESERVE_GIB=36` (room for the 24 GiB host prompt cache in unified memory) and
-`TF_QWEN_KV_PAGES=256`. The server is ready in 6-7 s. Its banner:
+`TF_QWEN_KV_PAGES=256`. The server is ready in 6-7 s, or 20 s with MTP drafting (the head is quantized at load). Its banner:
 
 ```
 model 5.27 GiB; 8 streams at once, the engine's own at a 262144-token window (4.23 GiB, in the model's), 7 more
@@ -118,30 +120,66 @@ HumanEval+ test is timing-dependent. Upstream main gave the same 614 replies as 
 Upstream main serves this model on a Spark with the converted tree, at the same speed and with the same greedy
 replies. What it lacks for this recipe is the long-prompt disk tier and the EXL3 packs.
 
-## Follow-up: MTP drafting
+## MTP drafting
 
-Measured, not shipped. The checkpoint carries one MTP layer (15 `mtp.*` tensors, BF16). No released TensorFold drafts
-with it over a dense `qwen3_5` target: CUDA opens MTP drafting for MoE targets only. Upstream draft PR
-[#3867](https://github.com/ashhart/TensorFold/pull/3867) (issue [#3858](https://github.com/ashhart/TensorFold/issues/3858))
-adds a dense BF16 MTP drafter for SenseNova-Loop-9B. For this measurement its head (`123bbd474`) was built with its
-SenseNova-only gates widened to any dense, non-EXL3 `qwen3_5` target (four files, 7 lines), and served `q9-q4` with the
-checkpoint's MTP tensors saved beside it as `mtp.safetensors`. The banner reads `drafts: MTP (...) + copies`. Same
-Spark, same flags as the default profile, greedy:
+On by default in the default profile. The checkpoint carries one MTP layer (15 `mtp.*` tensors, BF16); the `cuda`
+build drafts with it through upstream PR [#3582](https://github.com/ashhart/TensorFold/pull/3582)'s dense MTP drafter,
+backported to the pin (`cuda` `0028`-`0029`). The head sits beside the tree as `mtp.safetensors`
+(`scripts/mtp-head.sh`, [CONVERT](CONVERT.md#the-mtp-head)) and is quantized to affine-4 tables at load (`0030`).
+A stream with a copy ahead takes the copy without an MTP pass (`0031`). `scripts/serve.sh` adds `--drafter TREE` when
+the tree holds the head and the profile has a `.mtp` file (`config/cuda/serve.mtp`). `MTP=0` serves copy drafts
+only; `PROFILE=batch` stays copies only, because 16 short chats at once are where MTP does not pay (below).
 
-| check | MTP + copies | copies only (same binary) |
-| --- | ---: | ---: |
-| decode, 21-token prompt | **63.6 tok/s** | 46.1 |
-| decode after a 30,209-token prompt | **59.7** | 41.2 |
-| 1 chat / 4 chats aggregate | **62.7 / 198.1** | 45.8 / 161.9 |
-| copy drafts: re-quote / code edit | 1,185 / 883 | 1,441 / 866 |
-| free prose | **69.5** | 46.0 |
-| HumanEval+ 164, budget 1024, 16 at once | 147/164 = 89.6, **303 s** | 147/164 = 89.6, 387 s |
-| server ready | 20.1 s | 6.9 s |
+```
+qwen mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)
+serving q9 at http://127.0.0.1:8090/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP (q9-q4) + copies; ...)
+```
 
-Every drafted reply equals its `"draft": false` reply, and the 164 HumanEval+ replies are token-identical across MTP,
-copies only and this recipe's `cuda` build. On HumanEval+ the MTP head's drafts were accepted 69% of the time (123,079
-of 178,132 tokens); copy drafts alone 20% (66,476 of 339,215). MTP adds about 38% to one chat's decode and 22% to
-the 4-chat aggregate, and costs 18% on long re-quotes, where copy drafts already win.
+The recipe build (`0001`-`0031`) on one GB10, default profile, greedy, 256 tokens with `ignore_eos` and thinking off.
+Every row's replies were compared, stream by stream, with the same prompts sent with `"draft": false`. Columns:
+- **MTP + copies:** the default;
+- **copies only:** the same tree without the head;
+- **plain:** `"draft": false`;
+- **previous recipe:** `0001`-`0027`, copy drafts.
 
-It is not in the recipe because the drafter is an unmerged draft PR built for another checkpoint, and the widened gates
-are a local change. When upstream TensorFold drafts with a dense `qwen3_5` MTP head, this becomes a recipe row.
+Chat rows show per-stream decode / aggregate tok/s. The aggregate counts the whole wave, including the other
+streams' prefill: prompts at 4K and 28K are not served from the prompt cache in this cell.
+
+| cell | MTP + copies | copies only | plain | previous recipe | replies |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 1 chat, 52-token prompt | **73.5 / 73** | 50.2 / 50 | 47.0 / 47 | 50.4 / 50 | identical |
+| 4 chats, 52 tokens | **62.3 / 229** | 45.4 / 168 | 42.5 / 167 | 44.8 / 168 | identical |
+| 8 chats, 52 tokens, first wave | **49.6 / 351** | 38.4 / 298 | 38.4 / 299 | 38.5 / 299 | identical |
+| 8 chats, 52 tokens, later waves | 36.7-37.1 / 255-266 | | 38.5 / 298 | | identical |
+| 1 chat, 4,057-token prompt | **75.4 / 59** | 46.5 / 40 | 46.2 / 40 | 46.7 / 40 | identical |
+| 4 chats, 4,057 tokens | **55.1 / 92** | 36.5 / 78 | 36.4 / 77 | 36.6 / 78 | identical |
+| 8 chats, 4,057 tokens | **47.3 / 99** | 31.8 / 92 | 31.5 / 91 | 31.6 / 91 | identical |
+| 1 chat, 28,322-token prompt | **66.5 / 52** | 42.7 / 36 | 42.5 / 36 | 42.4 / 36 | identical |
+| 4 chats, 28,322 tokens | **42.9 / 72** | 29.2 / 63 | 29.2 / 61 | 29.4 / 62 | identical |
+| 8 chats, 28,322 tokens | **34.2 / 78** | 23.6 / 71 | 23.6 / 71 | 23.7 / 71 | identical |
+| re-quote a 6,000-character passage (512 tokens) | **1,674** | 1,517 | 47 | 1,519 | identical |
+| rename a variable through the same file | **1,171** | 908 | 47 | 906 | identical |
+| free prose | **81** | 47 | 47 | 47 | identical |
+| server ready | 20 s | 8 s | | 7 s | |
+
+- **HumanEval+ 164** (budget 1024, `max_tokens` 1536, 16 at once, `PROFILE=batch` with `--drafter` added): 145/164 =
+  88.4 in 308 s with MTP and 145/164 in 333 s with copy drafts only; all 164 replies token-identical. The MTP head's
+  drafts were accepted 70% of the time (112,123 of 160,038). 13 replies stop at the 1,536-token cap; each is a prefix
+  of the reply in this page's earlier HumanEval+ runs, which ran past it. The shipped engine and this build both count
+  thinking inside `max_tokens` (checked on one request), so the gap to 89.0-89.6 lies outside drafting.
+- **30-minute soak**, default profile with MTP, 8 at once (tool calls, streaming, chat, long prompts, code): 1,085
+  requests, 0 failures. Server RSS 0.44 to 0.86 GiB; host MemAvailable 68.2 GiB at the start, 67.2 at its lowest,
+  68.0 at the end.
+- **Two more GB10s agree.** They ran #3582's head and the backport without `0031`: 74-75 tok/s for 1 chat at 52 to
+  28K tokens against 41-46 plain, and 8 chats at 28K at 71 against 64-65 aggregate.
+  - Without `0031`, re-quotes ran 1,264-1,356 against copies only's 1,430-1,445, 5-13% slower.
+  - With `0031` they run 8-10% faster than copies only, and code edits gain 12% over MTP without it.
+- **Memory:** host MemAvailable fell by 53 GiB at peak, against 43-44 GiB with copy drafts. On unified memory this covers
+  the drafter's ring and scratch at 8 streams and a 262,144-token window, and the 36 GiB reserve.
+- **8 short chats at once:** the first wave on a fresh server runs 18% above plain. Later waves settle 11-17% below it.
+  - The server's per-request log shows why: the lanes rule cuts each stream's drafts to about half once it has priced
+    shared rounds, while every round still pays the MTP layer's absorb.
+  - With 4K or 28K prompts, 8 chats stay ahead (+8-10% aggregate).
+  - The batch profile (16 chats) therefore keeps copy drafts only ([KNOWN-ISSUES](KNOWN-ISSUES.md)).
+- **Pin:** #3582 rebased onto upstream main `4c616e63d` (its head `5b2be93de`) ran on the same GB10 within 1% of this
+  pin in every plain and MTP cell, with the same replies. The recipe keeps pin `038e4a278` with the backport.

@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 11:03:31 +0700
+Subject: [PATCH 31/31] qwen3_5: an MTP round leaves a copy ahead to the copy
+ (copy_first), so re-quotes keep copy drafts' speed
+
+---
+ zig/src/core/lanes/config.zig                  | 2 +-
+ zig/src/core/lanes/drafted_copy_test.zig       | 7 +++++++
+ zig/src/families/qwen3_5/cuda_mtp_contract.zig | 2 +-
+ 3 files changed, 9 insertions(+), 2 deletions(-)
+
+diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
+index b7f0f20e4..97b110711 100644
+--- a/zig/src/core/lanes/config.zig
++++ b/zig/src/core/lanes/config.zig
+@@ -189,7 +189,7 @@ pub const Config = struct {
+                 .draft_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).draft_slack,
+                 .grant_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).grant_slack,
+                 .short_slack = if (m.draft_slack > 0) m.draft_slack else (Constants{}).short_slack,
+-                .copy_first = m.copy_first and !m.context_copies,
++                .copy_first = m.copy_first,
+                 .floor_rates = m.floor_rates,
+                 .hold_costs = m.hold_costs,
+             },
+diff --git a/zig/src/core/lanes/drafted_copy_test.zig b/zig/src/core/lanes/drafted_copy_test.zig
+index 86d13c3e2..e53382866 100644
+--- a/zig/src/core/lanes/drafted_copy_test.zig
++++ b/zig/src/core/lanes/drafted_copy_test.zig
+@@ -132,6 +132,13 @@ test "a copy ahead takes the round: with copy_first no hold is asked for it, and
+     }
+ }
+ 
++test "copy_first: a drafter that declares it keeps it beside the CUDA hybrids' context copies" {
++    const m: @import("config.zig").Model = .{ .exact_width = 16, .hidden_rows = true, .batch_rows = 32, .context_copies = true, .copy_drafts = true, .copy_first = true };
++    var cfg = try Config.init(gpa, m, 16, 15);
++    defer cfg.deinit(gpa);
++    try std.testing.expect(cfg.context_copies and cfg.k.copy_first);
++}
++
+ test "plain_streams: rounds that wide verify no copy, narrower ones still copy; replies equal one-token decode" {
+     const plain = try run(3, false, false, 0);
+     const wide = try run(3, true, false, 3);
+diff --git a/zig/src/families/qwen3_5/cuda_mtp_contract.zig b/zig/src/families/qwen3_5/cuda_mtp_contract.zig
+index 4ee97be33..56150adde 100644
+--- a/zig/src/families/qwen3_5/cuda_mtp_contract.zig
++++ b/zig/src/families/qwen3_5/cuda_mtp_contract.zig
+@@ -17,7 +17,7 @@ pub fn Adapter(comptime Mtp: type) type {
+ 
+         pub fn facts(p: *anyopaque) dr.Facts {
+             const d = cast(p);
+-            return .{ .limit_shared_drafts = true, .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.ringBytes() + 2 * d.e.g.hidden * 2 + max_lanes * 4, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs] };
++            return .{ .limit_shared_drafts = true, .depth = d.depth, .step_ms = d.step_ms, .prior = &prior, .plain_guard = true, .batched = !d.trees, .stream_bytes = d.ringBytes() + 2 * d.e.g.hidden * 2 + max_lanes * 4, .trees = d.trees, .window_costs = d.costs[0..d.n_costs], .lane_costs = d.costs[0..d.n_costs], .copy_first = true };
+         }
+     };
+ }
+-- 
+2.56.0
+

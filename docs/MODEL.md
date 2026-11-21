@@ -30,7 +30,7 @@ length.
 
 ## Drafting
 
-The checkpoint ships an MTP head, but none of the engines in this recipe drafts with a dense target's MTP head (CUDA
-opens MTP only over an MoE target; the Metal `qwen27` engine has no MTP drafter). An upstream draft PR's drafter was
-measured with it: [CUDA](CUDA.md#follow-up-mtp-drafting). Copy drafts, which draft from a
-chat's own context and need no extra weights, are on by default everywhere. See [KNOWN-ISSUES](KNOWN-ISSUES.md).
+The checkpoint ships an MTP head. The `cuda` build drafts with it by default, from `mtp.safetensors` beside the tree
+(`scripts/mtp-head.sh`, [CONVERT](CONVERT.md#the-mtp-head); speeds in [CUDA](CUDA.md#mtp-drafting)). The RTX, Metal
+and HIP builds do not yet ([PORT-NOTES](../PORT-NOTES.md)). Copy drafts, which draft from a chat's own context and need
+no extra weights, are on by default everywhere. See [KNOWN-ISSUES](KNOWN-ISSUES.md).

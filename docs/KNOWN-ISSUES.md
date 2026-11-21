@@ -2,10 +2,9 @@
 
 ## All devices
 
-- **No speculative drafter beyond copy drafts.** The checkpoint ships an MTP head, but CUDA drafts with an MTP head
-  only over an MoE target and the Metal `qwen27` engine has no MTP drafter (pins and upstream `main`); the converter
-  and the EXL3 pack leave `mtp.*` out. An upstream draft PR's dense MTP drafter, widened locally, drafts with it on a
-  Spark at 62.7 against 45.8 tok/s with identical replies ([CUDA](CUDA.md#follow-up-mtp-drafting)); not shipped. [`z-lab/Qwen3.5-9B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-9B-DFlash) is a DFlash v1
+- **MTP drafting on the DGX Spark only.** The `cuda` build drafts with the checkpoint's MTP head
+  ([CUDA](CUDA.md#mtp-drafting)). The RTX build (EXL3 pack) and the Metal `qwen27` engine do not draft with it, and
+  HIP is not yet checked ([PORT-NOTES](../PORT-NOTES.md)). [`z-lab/Qwen3.5-9B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-9B-DFlash) is a DFlash v1
   drafter (block 16, one full-attention layer, no candidate selector); TensorFold's CUDA drafter reads DFlash2 only
   and refuses it with `BadDraftConfig`. No DFlash2 drafter for Qwen3.5-9B is published. Copy drafts are on and exact.
 - **Images are not covered.** The converted tree carries the vision tower; the CUDA image path and Metal's images
@@ -22,6 +21,12 @@
   converter ([CONVERT](CONVERT.md)).
 - Upstream `main` without the series serves the converted tree at the same speed, but its NVMe tier skips saving long
   prompt states (`StagingFull`) and it refuses the EXL3 packs ([CUDA](CUDA.md#upstream-main)).
+- **MTP at 8 short chats at once.** A fresh server's first wave runs 18% above plain decode (351 against 298 tok/s
+  aggregate); later waves settle at 255-266, 11-17% below it. The lanes rule prices shared rounds as it runs and cuts
+  each stream's drafts to about half, while every round still pays the MTP layer. With 4K or 28K prompts 8 chats stay
+  ahead, and `PROFILE=batch` (16 chats) serves copy drafts only. Serve `MTP=0` for a server that only takes many
+  short chats at once ([CUDA](CUDA.md#mtp-drafting)).
+- **Startup takes 20 s with MTP** against 7 s with copy drafts only: the loader quantizes the BF16 head at load.
 
 ## RTX
 

@@ -1,0 +1,98 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 10:01:11 +0700
+Subject: [PATCH 30/31] qwen3_5: a dense checkpoint's BF16 MTP head may sit
+ beside the tree unindexed (mtp.safetensors)
+
+---
+ zig/src/families/qwen3_5/cuda_mtp_bf16.zig    |  2 +-
+ zig/src/families/qwen3_5/cuda_mtp_weights.zig | 30 ++++++++++++++-----
+ 2 files changed, 24 insertions(+), 8 deletions(-)
+
+diff --git a/zig/src/families/qwen3_5/cuda_mtp_bf16.zig b/zig/src/families/qwen3_5/cuda_mtp_bf16.zig
+index e48c4d6c1..4afd7643b 100644
+--- a/zig/src/families/qwen3_5/cuda_mtp_bf16.zig
++++ b/zig/src/families/qwen3_5/cuda_mtp_bf16.zig
+@@ -157,7 +157,7 @@ fn mlp(l: *Loader) !engine.Mlp {
+ /// The `mtp.*` tensors of the checkpoint in `dir` into the same tables `mtp.load` packs from mtp-4bit.safetensors.
+ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !mtp.Weights {
+     const g = e.g;
+-    var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
++    var ck = try mtp.openHead(gpa, io, dir);
+     defer core.checkpoint.cache.close(&ck);
+     if (!ck.has("mtp.fc.weight")) return error.NoMtpLayer;
+     std.log.info("qwen mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)", .{});
+diff --git a/zig/src/families/qwen3_5/cuda_mtp_weights.zig b/zig/src/families/qwen3_5/cuda_mtp_weights.zig
+index 072c879ca..c1d629f5d 100644
+--- a/zig/src/families/qwen3_5/cuda_mtp_weights.zig
++++ b/zig/src/families/qwen3_5/cuda_mtp_weights.zig
+@@ -1,4 +1,4 @@
+-//! The Qwen3.6 MTP layer's weights (mtp-4bit.safetensors beside the checkpoint) onto the device, their own arena.
++//! The Qwen MTP layer's weights (mtp-4bit.safetensors, or a dense BF16 head) onto the device, in their own arena.
+ const std = @import("std");
+ const cuda = @import("cuda");
+ const core = @import("core");
+@@ -17,14 +17,30 @@ pub const file = "mtp-4bit.safetensors";
+ pub const AllocationPlan = struct { resident: usize, staging: usize };
+ pub const Source = enum { standalone_affine4, indexed_bf16 };
+ 
+-/// Whether `dir` holds `file`.
+-fn hasFile(io: std.Io, dir: []const u8) bool {
++/// A dense checkpoint's BF16 MTP head may sit unindexed beside its tree, leaving the tree's index and shards as is.
++pub const beside = "mtp.safetensors";
++
++/// Whether `dir` holds `name`.
++fn holds(io: std.Io, dir: []const u8, name: []const u8) bool {
+     var buf: [std.fs.max_path_bytes]u8 = undefined;
+-    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, file }) catch return false;
++    const path = std.fmt.bufPrint(&buf, "{s}/{s}", .{ dir, name }) catch return false;
+     std.Io.Dir.cwd().access(io, path, .{}) catch return false;
+     return true;
+ }
+ 
++/// Whether `dir` holds `file`.
++fn hasFile(io: std.Io, dir: []const u8) bool {
++    return holds(io, dir, file);
++}
++
++/// The `mtp.*` names of the checkpoint in `dir`: its index's, else those of `beside` when the index lists none.
++pub fn openHead(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) !core.Checkpoint {
++    var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
++    errdefer core.checkpoint.cache.close(&ck);
++    if (!ck.has("mtp.fc.weight") and holds(io, dir, beside)) try ck.add(dir, beside);
++    return ck;
++}
++
+ /// Choose only formats whose loader matches this target and the stored MTP tensors.
+ pub fn sourceForTarget(g: geometry.Geometry, standalone: bool, indexed_head: bool, indexed_scales: bool) !Source {
+     if (!g.moe() and standalone) return error.UnsupportedMtpWeightFormat;
+@@ -37,7 +53,7 @@ pub fn sourceForTarget(g: geometry.Geometry, standalone: bool, indexed_head: boo
+ /// Whether this target can use a standalone or checkpoint-indexed MTP head.
+ pub fn hasHead(gpa: std.mem.Allocator, io: std.Io, dir: []const u8) bool {
+     if (hasFile(io, dir)) return true;
+-    var ck = core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.") catch return false;
++    var ck = openHead(gpa, io, dir) catch return false;
+     defer core.checkpoint.cache.close(&ck);
+     return ck.has("mtp.fc.weight");
+ }
+@@ -93,7 +109,7 @@ pub fn allocationPlan(gpa: std.mem.Allocator, io: std.Io, g: geometry.Geometry,
+         _ = try sourceForTarget(g, true, false, false);
+         return .{ .resident = total(g), .staging = stageBytes(g) };
+     }
+-    var ck = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
++    var ck = try openHead(gpa, io, dir);
+     defer core.checkpoint.cache.close(&ck);
+     const indexed_head = ck.has("mtp.fc.weight");
+     const indexed_scales = hasIndexedScales(&ck, g);
+@@ -153,7 +169,7 @@ pub fn load(gpa: std.mem.Allocator, io: std.Io, e: *Engine, dir: []const u8) !We
+         _ = try sourceForTarget(g, true, false, false);
+     } else {
+         {
+-            var indexed = try core.Checkpoint.openModelPrefix(gpa, io, dir, "mtp.");
++            var indexed = try openHead(gpa, io, dir);
+             defer core.checkpoint.cache.close(&indexed);
+             const indexed_head = indexed.has("mtp.fc.weight");
+             const indexed_scales = hasIndexedScales(&indexed, g);
+-- 
+2.56.0
+
