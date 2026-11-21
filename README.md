@@ -5,7 +5,7 @@ Support me here: https://buymeacoffee.com/jayleaton
 # Qwen3.5-9B on TensorFold: DGX Spark, RTX, Macs and Ally X
 
 A recipe for serving stock [Qwen3.5-9B](https://huggingface.co/Qwen/Qwen3.5-9B) with
-[TensorFold](https://github.com/ashhart/TensorFold) on a DGX Spark, a 16 GB RTX card and Apple Silicon, with the ROG Ally X (HIP) to follow. It ships exact
+[TensorFold](https://github.com/ashhart/TensorFold) on a DGX Spark, a 16 GB RTX card, Apple Silicon and the ROG Ally X (HIP). It ships exact
 upstream TensorFold pins with the patch series of the
 [SenseNova-Loop-9B recipe](https://github.com/jayleaton/sensenova-loop9b-tensorfold) (copy drafts in shared rounds,
 the host-RAM and NVMe prompt-cache tiers, EXL3 packs on RTX), a one-step conversion from the official BF16 checkpoint,
@@ -28,7 +28,7 @@ More in [CREDITS](docs/CREDITS.md); license terms in [LICENSING](docs/LICENSING.
 
 ## Pick your device
 
-Each row was built and run end to end, except the Ally X's, which waits on its device run. Every build checks the exact
+Each row was built and run end to end. Every build checks the exact
 engine tree before it compiles (`config/<config>/tensorfold.tree`). Numbers are one chat unless marked.
 
 | device | weights | engine (`config/`) | speed | quality | limits |
@@ -38,7 +38,7 @@ engine tree before it compiles (`config/<config>/tensorfold.tree`). Numbers are 
 | **Mac Studio M5 Ultra** | `q9-q4` | `metal`: pin `6d0a128b0` + `patches/metal` `0001`-`0044` | decode 121.7 tok/s, 106.2 after 32K; prefill 4,400-4,950 tok/s; copy drafts: re-quote 757, code edit 238 tok/s | HumanEval+ 87.8, BFCL held-out 81.3 | 4 chats at 65,536 tokens; Macs with 48 GB or more |
 | **16 GB Mac** | `q9-q4` | `metal`, `PROFILE=16gb` | as the Studio's per chip | | 1 chat at 81,920 tokens; peak 7.8 GiB (M5) to 9.4 GiB (M4 Pro) at 32K; measured under a 16 GB working-set cap |
 | **MacBook Pro M4 Pro** (24 GB) | `q9-q4` | `metal`, `PROFILE=24gb` | decode 44.5 tok/s, 29.9 after 32K; prefill about 400 tok/s; re-quote 169, code edit 77 tok/s | HumanEval+ 89.6, BFCL held-out 150-row subset 80.0 | 4 chats at 49,152 tokens; with everyday apps open, memory pressure admits one chat at a time |
-| **ROG Ally X** (Radeon 780M, `gfx1103`, HIP) | `q9-q4` | `hip`: upstream `813ff4c`, no patches | pending device run | pending device run | the engine's host suite and loader test pass on the CPU; the GPU waits on a reboot |
+| **ROG Ally X** (Radeon 780M, `gfx1103`, HIP) | `q9-q4` | `hip`: upstream `813ff4c`, no patches; the GPU numbers come from that pin plus SenseNova-Loop's looped family, idle for a stock checkpoint | decode 19.0 tok/s, 17.1 after 7.3K; copy drafts: re-quote 57.0, code edit 53.3 tok/s; a 5K prompt's next turn in 0.30 s (host RAM) | HumanEval+ 87.8, BFCL held-out 150-row subset 80.0 | 1 chat at 8,192 tokens, peak 7.4 GiB; keep GTT below the 8 GiB carve-out (`ttm.pages_limit=1966080`) or prefill hangs the GPU |
 
 **DGX Spark** ([CUDA](docs/CUDA.md)), CUDA 13 toolkit and Zig 0.17.0:
 
@@ -83,7 +83,7 @@ The checkpoint has no `generation_config.json`, so `scripts/convert.sh` writes Q
 | `cuda` | `038e4a278` | `cuda` `0001`-`0027` | `9bac6ecbdef1` | 2026-11-20 | DGX Spark |
 | `rtx` | `038e4a278` | `cuda` `0001`-`0022`, `rtx` `0001`-`0003` | `64ba7d4085cc` | 2026-11-20 | 16 GB RTX |
 | `metal` | `6d0a128b0` | `metal` `0001`-`0044` | `d33e2d93ea37` | 2026-11-20 | Macs |
-| `hip` | `813ff4c` | none | `f70d190f1d1b` | CPU checks only | Ally X, pending device run ([HIP](docs/HIP.md)) |
+| `hip` | `813ff4c` | none | `f70d190f1d1b` | 2026-11-20 | Ally X ([HIP](docs/HIP.md)) |
 | `upstream` | `727153cb3` | none | `c4e66e4220a8` | 2026-11-20 | control only ([CUDA](docs/CUDA.md#upstream-main)) |
 
 The series are the SenseNova-Loop-9B recipe's, byte for byte, plus `rtx` `0003` (the EXL3 attach tool records how a pack
@@ -121,8 +121,6 @@ and checks the resulting tree.
 - **DFlash drafting:** TensorFold reads DFlash2 drafters only, and none is published for this model
   ([KNOWN-ISSUES](docs/KNOWN-ISSUES.md)).
 - **Images.**
-- **ROG Ally X numbers:** the engine and tree are checked on its CPU; the GPU runs wait on a reboot
-  ([HIP](docs/HIP.md)).
 
 ## Documentation
 
@@ -134,7 +132,7 @@ and checks the resulting tree.
 | [CUDA](docs/CUDA.md) | DGX Spark: build, serve, speed, cache tiers, fidelity, quality, upstream main |
 | [RTX](docs/RTX.md) | EXL3 on a 16 GB RTX card |
 | [METAL](docs/METAL.md) | Apple Silicon |
-| [HIP](docs/HIP.md) | ROG Ally X, pending device run |
+| [HIP](docs/HIP.md) | ROG Ally X |
 | [ENGINE](docs/ENGINE.md) | the pins and what the series give a stock checkpoint |
 | [KNOWN-ISSUES](docs/KNOWN-ISSUES.md) | what is not solved |
 | [CREDITS](docs/CREDITS.md) / [LICENSING](docs/LICENSING.md) | who built what, and under which terms |

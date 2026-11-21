@@ -1,7 +1,8 @@
 # HIP: ROG Ally X (gfx1103)
 
-> **Pending device run.** The engine and the weights are checked on the machine's CPU; no number on this page comes
-> from the GPU yet. The device runs wait on a reboot ([KNOWN-ISSUES](KNOWN-ISSUES.md#hip)).
+> **Keep GTT below the 8 GiB carve-out.** Boot with `ttm.pages_limit=1966080 ttm.page_pool_size=1966080` (7.5 GiB).
+> With GTT above the carve-out (`4194304`, 15.3 GiB) the engine budgets from host memory, places its buffers in GTT, and
+> the GPU hangs in prefill ([KNOWN-ISSUES](KNOWN-ISSUES.md#hip)).
 
 | | |
 | --- | --- |
@@ -24,8 +25,9 @@ The official BF16 checkpoint itself fails the loader's mixed-dtype check (`linea
 tensors); the converter writes those in bf16, which is why the converted tree is what every backend serves.
 
 On the same GPU, a build that adds SenseNova-Loop's looped family to this pin (a strict superset for a stock
-checkpoint) passed the stock Qwen3.5-4B device gate, `tf-qwen35-test check` 46 passed / 0 failed / 6 skipped, before
-the GPU hang below.
+checkpoint: without `loop_settings` every layer runs once and none of the loop code engages) passed the stock
+Qwen3.5-4B device gate, `tf-qwen35-test check` 46 passed / 0 failed / 6 skipped. The device numbers below come from
+that build.
 
 ## Weights
 
@@ -52,14 +54,30 @@ zig build -Dhip=true native-hip -Dhip-arch=gfx1103 -Dhipcc=/opt/rocm/bin/hipcc \
   -Dhip-device-lib=/opt/rocm/amdgcn/bitcode
 ```
 
-There is no serve profile until the device run sets one.
+`scripts/serve.sh` has no HIP profile yet. The device run served with:
+
+```bash
+tensorfold-native serve q9-q4 --context 8192 --parallel 1 --prompt-cache-gib 0 --no-update-check
+```
+
+It admits the 4.69 GiB model, one stream at 0.30 GiB for 8,192 tokens and a 1.0 GiB reserve, and loads in 14-16 s.
 
 ## Device numbers
 
+2026-11-20, ROCm 7.2.4, greedy, 256-token replies unless noted.
+
 | measure | value |
 | --- | --- |
-| serve checklist (`/v1/models`, chat, streaming, tool calls, shutdown) | pending device run |
-| decode, one chat, at 1K / 4K / 7-8K | pending device run |
-| copy drafts against `"draft": false`: parity and speed | pending device run |
-| peak device memory, largest window that fits | pending device run |
-| prompt cache: resumed reply equals fresh | pending device run |
+| decode, short prompt (21 tokens), drafts off | **19.0 tok/s**, TTFT 0.25 s |
+| decode, 4.4K prompt (128-token replies) | **17.8 tok/s**, TTFT 11.7-12.3 s (about 370 tok/s prefill) |
+| decode, 7.3K prompt | **17.1 tok/s**, TTFT 20.0-21.3 s |
+| copy drafts against `"draft": false` | replies identical on every pair (short, 7.3K, re-quote, code edit, chat); re-quote **57.0** against 18.2 tok/s, code edit **53.3** against 18.2; plain chat unchanged (18.5 against 18.7) |
+| peak device memory | 6.3 GiB at 8,192 tokens with no prompt cache; **7.4 GiB** with `--prompt-cache-gib 1` |
+| prompt cache: resumed reply equals fresh | identical, twice (5K prompt): cold TTFT 13.4 s, resumed **0.30 s** |
+| serve checklist | `/v1/models`, chat with thinking on, a streamed reply to `[DONE]`, tool calls with `auto` and `required` (both `finish_reason: tool_calls`), SIGINT drains and exits |
+| HumanEval+ 164, think 1024, cap 1536 | **87.8** (144/164) against 89.6 for the stock 4-bit reference |
+| BFCL held-out 150-row subset, think 512 | **80.0** (120/150) against 82.4 for the stock 4-bit reference on all 450 rows |
+
+The two quality rows served with `--context 4096 --parallel 4 --thinking-reserve 2112 --prompt-cache-gib 0`. The stock
+9B decodes about 1.7× faster than SenseNova-Loop-9B on the same GPU (10.8 tok/s at 1K), which runs 56 layer executions
+a token against 32.

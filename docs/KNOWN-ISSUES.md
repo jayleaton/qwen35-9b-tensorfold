@@ -43,8 +43,12 @@
 
 ## HIP
 
-- **The Ally X has no device numbers yet.** Its GPU hung after a live change to the TTM memory limits (made while the
-  driver was loaded, the day before this recipe's runs); the same limits are now persisted on the kernel command line
-  and take effect at the next boot. Every device run waits on that reboot. Whether the hang came from the live change
-  or recurs at the persisted limits is open until the first run after it.
+- **GTT above the 8 GiB carve-out hangs the GPU in prefill.** With `ttm.pages_limit` at `4194304` (15.3 GiB) the engine
+  budgets from host memory, places its buffers in GTT, and `gfx1103` stops answering (`MES failed to respond to
+  msg=REMOVE_QUEUE`, three hangs in five minutes). At `1966080` (7.5 GiB, below the carve-out) every buffer lives in
+  VRAM and 38 requests ran clean. Keep GTT below the carve-out on this device.
+- **The GPU numbers come from a superset build, not the bare pin.** They were taken on `813ff4c` plus
+  SenseNova-Loop's looped family, which stays idle for a stock checkpoint; the unpatched pin passed the CPU checks only.
+- **Small windows only.** Speed was measured at one chat and 8,192 tokens and the quality rows at four chats and 4,096;
+  larger windows were not run on the device.
 - `scripts/build-engine.sh` has no HIP target; build with the `zig build` line in [HIP](HIP.md).
