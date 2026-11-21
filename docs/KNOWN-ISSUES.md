@@ -2,9 +2,9 @@
 
 ## All devices
 
-- **MTP drafting on the DGX Spark only.** The `cuda` build drafts with the checkpoint's MTP head
-  ([CUDA](CUDA.md#mtp-drafting)). The RTX build (EXL3 pack) and the Metal `qwen27` engine do not draft with it, and
-  HIP is not yet checked ([PORT-NOTES](../PORT-NOTES.md)). [`z-lab/Qwen3.5-9B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-9B-DFlash) is a DFlash v1
+- **MTP drafting everywhere but the RTX card.** The DGX Spark ([CUDA](CUDA.md#mtp-drafting)), the Macs, Studio and
+  MacBook Pro ([METAL](METAL.md#mtp-drafts)), and the Ally X ([HIP](HIP.md#mtp-drafts)) draft with the checkpoint's
+  MTP head. The RTX build (EXL3 pack) is pending its GPU run ([PORT-NOTES](../PORT-NOTES.md)). [`z-lab/Qwen3.5-9B-DFlash`](https://huggingface.co/z-lab/Qwen3.5-9B-DFlash) is a DFlash v1
   drafter (block 16, one full-attention layer, no candidate selector); TensorFold's CUDA drafter reads DFlash2 only
   and refuses it with `BadDraftConfig`. No DFlash2 drafter for Qwen3.5-9B is published. Copy drafts are on and exact.
 - **Images are not covered.** The converted tree carries the vision tower; the CUDA image path and Metal's images

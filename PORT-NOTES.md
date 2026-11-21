@@ -1,7 +1,9 @@
-# MTP drafting: what RTX and HIP need
+# MTP drafting: what RTX needs
 
 2026-11-21. The CUDA (DGX Spark) build drafts with the checkpoint's own MTP head and ships it on by default
-([CUDA](docs/CUDA.md#mtp-drafting)). This file lists what the RTX and HIP builds need to do the same.
+([CUDA](docs/CUDA.md#mtp-drafting)). The Macs (`metal` `0045`-`0050`, [METAL](docs/METAL.md#mtp-drafts)) and the Ally X
+(the HIP pin as it stands, [HIP](docs/HIP.md#mtp-drafts)) draft with it too. This file lists what the RTX build needs;
+its GPU run is pending.
 
 ## What the Spark build does
 
@@ -60,15 +62,9 @@
 7. **Cells:** decode at 4K and 30K, re-quote and code edit, drafted against plain against copies only, parity on
    each; startup. Top-1 against BF16 is unchanged by drafting.
 
-## HIP (ROG Ally X, `gfx1103`)
+## HIP (ROG Ally X, `gfx1103`): done
 
-1. **Engine:** upstream `813ff4c` already drafts with a `qwen3_5` MTP head on HIP
-   (`backend/hip/engine/mtp.zig`, `hip_lanes.zig`). No recipe patch is known to be needed.
-2. **How it finds the head:** `weights/checkpoint.zig` `Checkpoint.mtp()` reads `mtp.*` from side files
-   (`files.side`; its test writes `mtp.safetensors`) or from the main index. It opens them with the tree's own
-   quantization (`Table.open(..., c.config.quant)`), so it may refuse the BF16 sidecar in an affine-4 tree.
-   - First try `q9-q4` with the BF16 `mtp.safetensors` beside it.
-   - If it is refused, try a 4-bit affine g64 copy of the head (the converter's MLX affine path, with norms handled as
-     in the main tree), and record which one loads.
-3. **Memory:** the Ally X shares system RAM with the GPU. Measure the drafter's extra bytes at the profile's window.
-4. **Cells:** as for RTX, plus the HIP host suite on the pin.
+The pin drafts with the head as it stands, no engine patch. Its `Checkpoint.mtp()` opens side files with the tree's
+own quantization, so `scripts/mtp-sidecar.py` writes the head as a 4-bit g64 side file with the converter's quantizer
+and norm fold. Decode 19.0 to 26.8 tok/s (+41%), 2 chats 33.7 to 39.8, every reply token-identical, 0.1 GiB more
+memory: [HIP](docs/HIP.md#mtp-drafts).

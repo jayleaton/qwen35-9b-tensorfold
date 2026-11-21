@@ -35,10 +35,10 @@ engine tree before it compiles (`config/<config>/tensorfold.tree`). Numbers are 
 | --- | --- | --- | --- | --- | --- |
 | **DGX Spark** (GB10, 128 GB) | 4-bit MLX g64 (`q9-q4`) | `cuda`: pin `038e4a278` + `patches/cuda` `0001`-`0032` | MTP + copy drafts: decode 78.2 tok/s, 72.9 after 28K (plain 47.0, 42.5); 4 chats 226, 8 chats 349-359, 16 chats 479 tok/s aggregate; re-quote 1,668, code edit 1,177 tok/s; a 95K prompt's next turn in 0.54 s (host RAM) or 1.87 s after a restart (NVMe) | HumanEval+ 145/164 = 88.4 with copy drafts and with MTP, identical replies (thinking budget 1024, `max_tokens` 1536)\*; BFCL held-out 83.8; top-1 222/236 against BF16; 30-minute soaks, 857 requests (copy drafts) and 1,085 (MTP), 0 failures; MTP replies identical to `"draft": false` | images not covered |
 | **RTX 5070 Ti 16 GB** (WSL2) | EXL3 6.0 bpw (`st-6.0`), quantized here | `rtx`: pin `038e4a278` + `patches/cuda` `0001`-`0022` + `patches/rtx` `0001`-`0003` | decode 48-50 tok/s at 4K, 43-44 at 30K; 4 chats 182 tok/s aggregate; copy drafts: re-quote 939, code edit 880 tok/s; a 122K prompt's next turn in 3.2 s (host RAM), a 116K one in 1.3 s after a restart (NVMe) | top-1 236/236 against BF16 | the whole 262,144-token window at one chat, 12.49 GiB on the card beside the Windows desktop |
-| **Mac Studio M5 Ultra** | `q9-q4` | `metal`: pin `6d0a128b0` + `patches/metal` `0001`-`0044` | decode 121.7 tok/s, 106.2 after 32K; prefill 4,400-4,950 tok/s; copy drafts: re-quote 757, code edit 238 tok/s | HumanEval+ 87.8, BFCL held-out 81.3 | 4 chats at 65,536 tokens; Macs with 48 GB or more |
+| **Mac Studio M5 Ultra** | `q9-q4` | `metal`: pin `6d0a128b0` + `patches/metal` `0001`-`0050` | decode 121.7 tok/s, 106.2 after 32K; with the MTP head 228 and 171 after 32K, re-quote 1,012, code edit 452, 4 chats x 1K 364 against 306 tok/s plain, token-identical; prefill 4,400-4,950 tok/s; copy drafts: re-quote 757, code edit 238 tok/s | HumanEval+ 87.8, BFCL held-out 81.3 | 4 chats at 65,536 tokens; Macs with 48 GB or more |
 | **16 GB Mac** | `q9-q4` | `metal`, `PROFILE=16gb` | as the Studio's per chip | | 1 chat at 81,920 tokens; peak 7.8 GiB (M5) to 9.4 GiB (M4 Pro) at 32K; measured under a 16 GB working-set cap |
-| **MacBook Pro M4 Pro** (24 GB) | `q9-q4` | `metal`, `PROFILE=24gb` | decode 44.5 tok/s, 29.9 after 32K; prefill about 400 tok/s; re-quote 169, code edit 77 tok/s | HumanEval+ 89.6, BFCL held-out 150-row subset 80.0 | 4 chats at 49,152 tokens; with everyday apps open, memory pressure admits one chat at a time |
-| **ROG Ally X** (Radeon 780M, `gfx1103`, HIP) | `q9-q4` | `hip`: upstream `813ff4c`, no patches; the GPU numbers come from that pin plus SenseNova-Loop's looped family, idle for a stock checkpoint | decode 19.0 tok/s, 17.1 after 7.3K; copy drafts: re-quote 57.0, code edit 53.3 tok/s; a 5K prompt's next turn in 0.30 s (host RAM) | HumanEval+ 87.8, BFCL held-out 150-row subset 80.0 | 1 chat at 8,192 tokens, peak 7.4 GiB; keep GTT below the 8 GiB carve-out (`ttm.pages_limit=1966080`) or prefill hangs the GPU |
+| **MacBook Pro M4 Pro** (24 GB) | `q9-q4` | `metal`, `PROFILE=24gb` | decode 44.5 tok/s, 29.9 after 32K; with the MTP head (`metal` `0047`) 79.4 and 45.6 after 32K, code edit 132 tok/s, token-identical; prefill about 400 tok/s; re-quote 169, code edit 77 tok/s | HumanEval+ 89.6, BFCL held-out 150-row subset 80.0 | 4 chats at 49,152 tokens; with everyday apps open, memory pressure admits one chat at a time |
+| **ROG Ally X** (Radeon 780M, `gfx1103`, HIP) | `q9-q4` | `hip`: upstream `813ff4c`, no patches; the GPU numbers come from that pin plus SenseNova-Loop's looped family, idle for a stock checkpoint | decode 19.0 tok/s, 17.1 after 7.3K; with the MTP head 26.8 and 24.5 after 7.3K, 2 chats 39.8 tok/s aggregate, token-identical; copy drafts: re-quote 57.0, code edit 53.3 tok/s; a 5K prompt's next turn in 0.30 s (host RAM) | HumanEval+ 87.8, BFCL held-out 150-row subset 80.0 | 1 chat at 8,192 tokens, peak 7.4 GiB; keep GTT below the 8 GiB carve-out (`ttm.pages_limit=1966080`) or prefill hangs the GPU |
 
 \* The earlier Spark figure, 89.0-89.6, came from runs whose replies ran past the 1,536-token cap
 ([CUDA](docs/CUDA.md#mtp-drafting)).
@@ -66,7 +66,8 @@ scripts/serve.sh rtx engine-rtx st-6.0                       # 1 chat, 262,144 t
 ```bash
 scripts/build-engine.sh metal engine-metal
 scripts/convert.sh engine-metal Qwen3.5-9B q9-q4 4
-scripts/serve.sh metal engine-metal q9-q4                    # 48 GB+; PROFILE=24gb or PROFILE=16gb for smaller Macs
+scripts/mtp-head.sh Qwen3.5-9B q9-mtp-head                  # the checkpoint's MTP head in a directory of its own
+scripts/serve.sh metal engine-metal q9-q4 --drafter q9-mtp-head  # 48 GB+; PROFILE=24gb or 16gb for smaller Macs
 ```
 
 Every command above needs the checkpoint downloaded first ([Quick start](#quick-start)).
@@ -79,7 +80,9 @@ in OpenCode workflows graded by running what the model built, stock Qwen3.5-9B s
 `512` for tool calls; with thinking on, HumanEval+ goes from 78.7 to 89.6 and BFCL held-out from 77.8 to 82.4.
 The checkpoint has no `generation_config.json`, so `scripts/convert.sh` writes Qwen's temperature 1.0 / top_p 0.95
 (without it the engine samples greedily). Copy drafts are on by default and exact; on the DGX Spark the default
-profile also drafts with the checkpoint's MTP head (`MTP=0` turns it off). Details: [SERVING](docs/SERVING.md).
+profile also drafts with the checkpoint's MTP head (`MTP=0` turns it off); a Mac drafts with it given
+`--drafter q9-mtp-head`, and the Ally X from a 4-bit side file ([HIP](docs/HIP.md#mtp-drafts)).
+Details: [SERVING](docs/SERVING.md).
 
 ## Versions
 
@@ -87,13 +90,14 @@ profile also drafts with the checkpoint's MTP head (`MTP=0` turns it off). Detai
 | --- | --- | --- | --- | --- | --- |
 | `cuda` | `038e4a278` | `cuda` `0001`-`0032` | `20a3fb077816` | 2026-11-21 | DGX Spark |
 | `rtx` | `038e4a278` | `cuda` `0001`-`0022`, `rtx` `0001`-`0003` | `64ba7d4085cc` | 2026-11-20 | 16 GB RTX |
-| `metal` | `6d0a128b0` | `metal` `0001`-`0044` | `d33e2d93ea37` | 2026-11-20 | Macs |
+| `metal` | `6d0a128b0` | `metal` `0001`-`0050` | `8676a04d431b` | 2026-11-21 | Macs |
 | `hip` | `813ff4c` | none | `f70d190f1d1b` | 2026-11-20 | Ally X ([HIP](docs/HIP.md)) |
 | `upstream` | `727153cb3` | none | `c4e66e4220a8` | 2026-11-20 | control only ([CUDA](docs/CUDA.md#upstream-main)) |
 
 The series are the SenseNova-Loop-9B recipe's, byte for byte, plus `rtx` `0003` (the EXL3 attach tool records how a pack
 was calibrated) and `cuda` `0028`-`0032` (MTP drafting: upstream PR #3582 backported, the head beside the tree,
-copy-first rounds, and the hold priced as a fixed cost); their loop and mHC code stays idle for a stock checkpoint. What the stock model takes from them, and
+copy-first rounds, and the hold priced as a fixed cost) and `metal` `0045`-`0050` (the MTP head on Metal, copy-first,
+and a shared round's chains drafted together); their loop and mHC code stays idle for a stock checkpoint. What the stock model takes from them, and
 what upstream `main` lacks: [ENGINE](docs/ENGINE.md).
 
 ## Quick start
@@ -121,8 +125,9 @@ and checks the resulting tree.
 
 ## Not yet
 
-- **MTP drafting off the Spark:** the DGX Spark drafts with the checkpoint's MTP head by default. The RTX, Mac and Ally X
-  builds still serve copy drafts only; what each needs is in [PORT-NOTES](PORT-NOTES.md).
+- **MTP drafting on the RTX card:** the DGX Spark, the Macs (Studio and MacBook Pro, [METAL](docs/METAL.md#mtp-drafts))
+  and the Ally X ([HIP](docs/HIP.md#mtp-drafts)) draft with the checkpoint's MTP head. The RTX build still serves copy
+  drafts only, pending its GPU run; what it needs is in [PORT-NOTES](PORT-NOTES.md).
 - **DFlash drafting:** TensorFold reads DFlash2 drafters only, and none is published for this model
   ([KNOWN-ISSUES](docs/KNOWN-ISSUES.md)).
 - **Images.**
