@@ -2,13 +2,13 @@
 
 | | |
 | --- | --- |
-| Engine | upstream TensorFold `6d0a128b0` + [`patches/metal/`](../patches/metal/) `0001`-`0047`, tree `057830ab38a0e0708dd8a7fdfa146763975f1fc5` ([`config/metal/`](../config/metal/)), checked 2026-11-21 (`0001`-`0044`, tree `d33e2d93`, on 2026-11-20) |
+| Engine | upstream TensorFold `6d0a128b0` + [`patches/metal/`](../patches/metal/) `0001`-`0049`, tree `767bd3b7d1846ff4973616e7d4287392fbb9e000` ([`config/metal/`](../config/metal/)), checked 2026-11-21 (`0001`-`0044`, tree `d33e2d93`, on 2026-11-20) |
 | Studio | Mac Studio, M5 Ultra, 64-core GPU, 96 GiB; macOS 27.2, Xcode 27.2, Zig 0.17.0 |
 | MacBook Pro | M4 Pro, 20-core GPU (no tensor units), 24 GiB; macOS 26.3, Zig 0.17.0; Docker, Chrome and other apps left open, swap near full |
 | 16 GB Macs | the Studio with Metal's working set capped to a 16 GB Mac's (`TF_QWEN27_WORKING_SET_BYTES=11453251584`, 10.67 GiB), checked on the M4 Pro under the same cap; no physical 16 GB Mac |
 | Weights | `q9-q4` from [CONVERT](CONVERT.md): its four shards are byte-identical on the Studio, the MacBook and the DGX Spark |
 
-The `metal` series `0001`-`0044` serves the stock checkpoint unchanged; `0045`-`0047` add a reader and drafter for its MTP
+The `metal` series `0001`-`0044` serves the stock checkpoint unchanged; `0045`-`0049` add a reader and drafter for its MTP
 head ([MTP drafts](#mtp-drafts)). `tensorfold-native --version` prints 1.2.9.
 
 ## Build
@@ -64,7 +64,7 @@ info: qwen27: lone loop=lanes width=16; lane window=16, lane copies=on
 | cold prefill 4K / 8K / 32K | 4,949 / 4,892 / 4,444 tok/s | 4,760 / 4,768 / 4,370 | 406 / 397 / 345 |
 | peak footprint, 4K / 8K / 32K window | 10.75 / 10.88 / 11.63 GiB | **6.94 / 7.07 / 7.82 GiB** | 8.48 / 8.61 / 9.36 GiB |
 | copy drafts: re-quote / code edit | **757 / 238 tok/s** (6.2x / 1.95x) | | 169 / 77 (3.9x / 1.8x) |
-| MTP drafts: 1K / 32K / code edit ([MTP drafts](#mtp-drafts)) | **230 / 171 / 441 tok/s** | 32K chat 197 against 101 | **79 / 46 / 132** |
+| MTP drafts: 1K / 32K / re-quote / code edit ([MTP drafts](#mtp-drafts)) | **228 / 171 / 1,012 / 452 tok/s** | 32K chat 197 against 101 | **79 / 46 / 152 / 132** (before `0048`) |
 | HumanEval+ 164, budget 1024 | **144/164 = 87.8** | same weights and engine | **147/164 = 89.6** |
 | BFCL held-out, budget 512 | **366/450 = 81.3** | | 120/150 = 80.0 (the Studio: 116/150 on the same rows) |
 
@@ -129,19 +129,23 @@ rescore to 89.6.
 layer's state and the next token's embedding) and draft with it. `--drafter q9-mtp-head` loads its 15 `mtp.*` tensors
 and quantizes the linears to affine 4-bit at load; the `q9-q4` shards are not touched. Each round the head drafts a
 chain that stops after the draft taking the chain's probability under 0.5 (`TF_QWEN27_MTP_CONFIDENCE`) or at 8 drafts
-(`TF_QWEN27_MTP_DEPTH`), and the target verifies it, so replies are the tokens of `"draft": false`. With the head
-loaded, copy drafts add nothing (`TF_QWEN27_COPIES=1` gave the same rows) and stay off.
+(`TF_QWEN27_MTP_DEPTH`), and the target verifies it, so replies are the tokens of `"draft": false`. Copy drafts stay
+on beside the head: a lone stream appends up to 48 copied tokens past the chain (`TF_Q27_COPY_ROWS`, 0 turns them
+off), and several chats share copy rounds. `0048` (copy_first, the idea of `cuda` `0031` on the MTP recipe) starts
+those copies at a 6-token match and, once a copy has landed whole, lets the next copy take the round without a chain;
+a copy that misses hands the round back to the head. `0049` makes the serving line say `MTP (...) + copies` when the
+lone loop copies and `MTP (...)` alone when it does not (`lane copies=off` names only the lane policy).
 
 Studio, default profile, the speed rows above (drafted / `"draft": false`, tok/s; acceptance is accepted / drafted):
 
 | case | MTP | acceptance | copies only |
 | --- | --- | --- | --- |
-| 1K / 4K / 8K prompt | **230 / 114**, 201 / 115, 205 / 109 | 65%, 57%, 58% | 126 / 122, 120 / 120, 116 / 115 |
-| 32K prompt | **171 / 100** | 55% | 108 / 107 |
-| re-quote / code edit | 686 / 115, **441 / 115** | 67%, 83% | **763** / 121, 238 / 122 |
-| story | 213 / 115 | 61% | 123 / 122 |
-| 4 chats, 1K each (aggregate) | 302 / 300 | 69% | 316 / 352 |
-| 4 chats, 32K each (each chat's decode) | **136-174 / 25-100** | 57% | 94-107 / 29-100 |
+| 1K / 4K / 8K prompt | **228 / 115**, 197 / 113, 202 / 110 | 55%, 46%, 55% | 126 / 122, 120 / 120, 116 / 115 |
+| 32K prompt | **171 / 102** | 47% | 108 / 107 |
+| re-quote / code edit | **1,012 / 115**, **452 / 116** | 63%, 64% | 763 / 121, 238 / 122 |
+| story | 214 / 115 | 61% | 123 / 122 |
+| 4 chats, 1K each (aggregate) | 303 / 305 | 69% | 316 / 352 |
+| 4 chats, 32K each (each chat's decode) | **140-183 / 88-100** | 57% | 94-107 / 29-100 |
 | startup | 11.6 s first launch of a build, 2.1 s after; 14.7 GiB wired (14.3 without) | | 11.6 s, 14.3 GiB |
 
 - All 9 cases token-identical drafted and plain, on every run (11 servers, chain settings swept). HumanEval+ and BFCL
@@ -157,8 +161,11 @@ Studio, default profile, the speed rows above (drafted / `"draft": false`, tok/s
   9.0 GiB wired with the head (8.5 without), 10.0 GiB footprint peak. HumanEval+ and BFCL (150-row subset) replies
   are identical to the run without it (164/164, 150/150), and the runs took 1,363 s and 680 s instead of 2,737 s and
   1,259 s.
-- Re-quoting a long passage stays faster with copies alone (763 against 686 on the Studio, 186 against 152 on the
-  MacBook); everything else gains from the head.
+- copy_first (`0048`): re-quote 686 -> 1,012 tok/s, above copies alone (763); code edit 441 -> 452; every other row
+  within run-to-run noise (4K 196-201 over six servers). The 6-token match alone gave re-quote 1,002 and code edit
+  438; copy_first on every round instead of after a landed copy dropped code edit to 329. Acceptance reads lower
+  because the copies offer more tokens. The MacBook rows are from the build before `0048`; there, re-quote was 152
+  with the head against 186 with copies alone.
 
 ## Upstream main on a Mac
 

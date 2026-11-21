@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 14:41:21 +0800
+Subject: [PATCH 49/49] qwen27: the serving line names the lone loop's copies
+ beside an MTP head
+
+With a drafter, a lone stream copies past its drafts in the serial loop
+(TF_Q27_COPY_ROWS rows), which the lane config does not name, so a one-stream
+server printed "drafts: MTP (...)" while copying. The line now adds "+ copies"
+when the serial loop copies, and says "MTP (...)" alone when it does not
+(TF_Q27_COPY_ROWS=0 on one stream).
+---
+ zig/src/native/qwen27_served.zig | 2 ++
+ zig/src/native/qwen27_slots.zig  | 2 +-
+ 2 files changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/zig/src/native/qwen27_served.zig b/zig/src/native/qwen27_served.zig
+index 2c2d1efe..16c01981 100644
+--- a/zig/src/native/qwen27_served.zig
++++ b/zig/src/native/qwen27_served.zig
+@@ -402,6 +402,8 @@ pub fn attach(parent: Allocator, io: std.Io, model: *q.model.Model, drafter: ?*q
+     h.host.decoded_rows = true; // a reply's rows prefill with the bits decoding gave them, with the cache on or off
+     // A lone greedy request keeps its long-copy tail on the narrow tensor window; arrivals yield to lanes.
+     if (h.draft != null and serial) h.host.lone = .{ .ctx = h, .run = Host.lone };
++    // the serving line's copies: also the lone loop's, past its drafts, which the lane config does not name
++    if (h.draft != null and serial and try @import("qwen27_slots.zig").copyRows() > 0) h.host.info_.draft_sources.copies = true;
+     // a reply that ends soon goes first beside a long prompt; a share someone set stays as they set it
+     if (o.decode_share == null and std.c.getenv("TENSORFOLD_PREFILL_SHARE") == null) h.host.srpt = .withDefault(true);
+     var loop_text: [160]u8 = undefined;
+diff --git a/zig/src/native/qwen27_slots.zig b/zig/src/native/qwen27_slots.zig
+index 355c3fd5..b8701f12 100644
+--- a/zig/src/native/qwen27_slots.zig
++++ b/zig/src/native/qwen27_slots.zig
+@@ -459,7 +459,7 @@ const Copies = struct {
+ };
+ 
+ /// Copied rows a lone round may add past its drafted tree, at most (TF_Q27_COPY_ROWS overrides; 0: none).
+-fn copyRows() !u32 {
++pub fn copyRows() !u32 {
+     return @import("sys").environment.read(u32, "TF_Q27_COPY_ROWS", 48);
+ }
+ 
+-- 
+2.56.0
+

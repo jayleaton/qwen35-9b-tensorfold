@@ -1,0 +1,102 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 14:41:21 +0800
+Subject: [PATCH 48/49] qwen27: a lone MTP stream leaves a copy ahead to the
+ copy (copy_first)
+
+The serial loop's copies waited for a 24-token match, the DFlash2 tensor-unit
+rule, so a re-quote spent most rounds on MTP chains. With an MTP head the
+copies now match at the lanes' default (6), and once a copy has landed whole
+the next copy takes the round alone: the head drafts no chain for it, as on
+CUDA (copy_first). A copy that misses hands the next round back to the chain.
+
+M5 Ultra, Qwen3.5-9B q4, served greedy, 256 tokens, drafted / "draft": false,
+every reply token-identical: re-quote 686 -> 1,012 tok/s (copies alone 763),
+code edit 441 -> 452; 1K 228, 4K 197-198, 8K 202-205, 32K 171, story 214, within
+run-to-run noise of before. Without copy_first, the match length alone gives
+re-quote 1,002 and code edit 438.
+---
+ zig/src/core/lanes/lanes.zig                  | 1 +
+ zig/src/families/qwen27/dflash/generation.zig | 8 +++++---
+ zig/src/native/qwen27_slots.zig               | 7 +++++--
+ 3 files changed, 11 insertions(+), 5 deletions(-)
+
+diff --git a/zig/src/core/lanes/lanes.zig b/zig/src/core/lanes/lanes.zig
+index f9b284af..038a9905 100644
+--- a/zig/src/core/lanes/lanes.zig
++++ b/zig/src/core/lanes/lanes.zig
+@@ -56,6 +56,7 @@ pub const Stream = stream.Stream;
+ pub const Sampling = sampling.Sampling;
+ pub const Penalties = sampling.Penalties;
+ pub const SuffixLookup = proposer.SuffixLookup;
++pub const SuffixParams = proposer.Params;
+ pub const LogprobRow = logprob.Row;
+ pub const Trim = trim.Trim;
+ 
+diff --git a/zig/src/families/qwen27/dflash/generation.zig b/zig/src/families/qwen27/dflash/generation.zig
+index a8b10b0a..6c510e21 100644
+--- a/zig/src/families/qwen27/dflash/generation.zig
++++ b/zig/src/families/qwen27/dflash/generation.zig
+@@ -9,7 +9,7 @@ const Draft = @import("runtime_model.zig").Model;
+ pub const Proposer = struct { ptr: *anyopaque, call: *const fn (*anyopaque, u32, u32) anyerror!@import("selector.zig").Tree };
+ pub const Result = struct { tokens: []u32, rounds: usize, verified: usize, matched: usize, min_rows: u32 = 0, extended: u32 = 0, extension_landed: u32 = 0 };
+ /// What the context says follows `path` (the pending token first), at most `max` tokens; borrowed until the next call.
+-pub const Extender = struct { ptr: *anyopaque, call: *const fn (*anyopaque, []const u32, u32) anyerror![]const u32 };
++pub const Extender = struct { ptr: *anyopaque, call: *const fn (*anyopaque, []const u32, u32) anyerror![]const u32, first: bool = false }; // first: copy_first
+ pub const Generation = struct {
+     allocator: std.mem.Allocator,
+     runner: *Runner,
+@@ -237,13 +237,15 @@ pub const Generation = struct {
+         if (available == 0) return error.ContextFull;
+         const offered: u32 = @intCast(@min(nodes, available - 1));
+         const selection = if (fused) Draft.loneSelection(offered) else @import("selector.zig").Options{ .nodes = offered };
+-        var tree = if (g.proposer) |proposer| try proposer.call(proposer.ptr, pending, offered) else try g.draft.proposeOptions(pending, selection);
++        // an MTP head drafts a step at a time: a copy ahead takes the round whole (copy_first), the head drafting none
++        const lead: []const u32 = if (extend) |x| (if (x.first and g.proposer == null and g.draft.head != null and extra > 0) try x.call(x.ptr, &.{pending}, @min(extra, @as(u32, @intCast(@import("core").tree_round.max_rows - 1)), available - 1)) else &.{}) else &.{};
++        var tree = if (lead.len > 0) @import("selector.zig").Tree{ .gpa = g.allocator, .tokens = try g.allocator.alloc(u32, 0), .parents = try g.allocator.alloc(i32, 0), .scores = try g.allocator.alloc(f64, 0) } else if (g.proposer) |proposer| try proposer.call(proposer.ptr, pending, offered) else try g.draft.proposeOptions(pending, selection);
+         defer tree.deinit();
+         const drafted = try tree.verifyParents(g.allocator);
+         defer g.allocator.free(drafted);
+         // a copy from the root shares the tree's nodes while they agree, and its rest hangs below the last shared one
+         const room = @min(extra, @as(u32, @intCast(@import("core").tree_round.max_rows - drafted.len)), available - 1 - @as(u32, @intCast(tree.tokens.len)));
+-        const copy: []const u32 = if (extend) |x| (if (room > 0) try x.call(x.ptr, &.{pending}, room + @as(u32, @intCast(tree.tokens.len))) else &.{}) else &.{};
++        const copy: []const u32 = if (lead.len > 0) lead else if (extend) |x| (if (room > 0) try x.call(x.ptr, &.{pending}, room + @as(u32, @intCast(tree.tokens.len))) else &.{}) else &.{};
+         var last: i32 = 0;
+         var shared: usize = 0;
+         follow: for (copy) |token| {
+diff --git a/zig/src/native/qwen27_slots.zig b/zig/src/native/qwen27_slots.zig
+index 78cb0c54..355c3fd5 100644
+--- a/zig/src/native/qwen27_slots.zig
++++ b/zig/src/native/qwen27_slots.zig
+@@ -480,8 +480,10 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+     const g = &d.generation;
+     const cap = try copyRows();
+     var extra: u32 = @min(cap, 16); // grows while copies land whole, shrinks when most miss
+-    var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = b.serial_copy_match }) };
++    // an MTP head's rounds are cheap to give up for a copy: copies start at the lanes' own match length
++    var copies = Copies{ .lookup = try lanes.SuffixLookup.init(b.gpa, .{ .min_match = if (d.model.head != null) (lanes.SuffixParams{}).min_match else b.serial_copy_match }) };
+     defer copies.lookup.deinit();
++    var landing = false; // the last copy landed whole: the next one takes the round ahead of an MTP chain
+     _ = try s.commit(b.gpa, &.{try (q.session.Session{ .runner = b.runner }).greedy()}, &.{});
+     hooks.committed(hooks.ctx);
+     while (!s.finished) {
+@@ -496,7 +498,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+         const before = b.runner.gpu_seconds;
+         mtl.pass_metrics.begin(b.pass_profile, "serial", b.window, mtl.clock.seconds);
+         defer mtl.pass_metrics.end();
+-        const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call } else null;
++        const extend: ?q.dflash.generation.Extender = if (extra > 0) .{ .ptr = &copies, .call = Copies.call, .first = landing } else null;
+         const result = if (b.serial_copy_match == 24 and @import("qwen27_window.zig").serialTail(b.tensor_units, b.window))
+             try g.runRoundTail(room, @min(b.nodes, 15), s.eos, true, extend, extra)
+         else
+@@ -505,6 +507,7 @@ pub fn lone(b: *Metal, s: *lanes.Stream, hooks: api.LoneHooks) !bool {
+         charge(b, s, before);
+         if (result.extended > 0) {
+             try copies.lookup.observe(result.extended, result.extension_landed);
++            landing = result.extension_landed == result.extended;
+             if (result.extension_landed == result.extended) extra = @min(cap, extra * 2) else if (2 * result.extension_landed < result.extended) extra = @max(@min(cap, 16), extra / 2);
+         }
+         if (result.tokens.len == 0) break;
+-- 
+2.56.0
+
