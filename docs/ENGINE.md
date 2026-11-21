@@ -7,7 +7,7 @@ series applied in order where it has one. The pin, the series and the resulting 
 | --- | --- | --- | --- | --- |
 | `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0031` | `10b9ba30123fa33a2390c9f7944abdfa14d4ec98` | DGX Spark |
 | `rtx` | same | `cuda:0022 rtx:0003` | `64ba7d4085cc4742c127af91fa196218b189bdbf` | 16 GB RTX |
-| `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0047` | `58d149eddd72fba53b8ce93f7e2e2fd0ccacf5c2` | Macs |
+| `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0047` | `057830ab38a0e0708dd8a7fdfa146763975f1fc5` | Macs |
 | `hip` | `813ff4ccbf9d6610e991a96d53fda2b628f56347` | none | `f70d190f1d1bd65575a53f7eb06838c7acf97cfc` | Ally X ([HIP](HIP.md)) |
 | `upstream` | `727153cb33876173efb256d60a12e69413cf1248` | none | `c4e66e4220a8c650d1d94b0fdda4906d6dced988` | control |
 

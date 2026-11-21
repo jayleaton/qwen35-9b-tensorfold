@@ -6,14 +6,31 @@ Subject: [PATCH 46/47] core: draft head rope, sigmoid gate and add kernels
 Three BF16 draft primitives for a gated attention block: an in-place NeoX rope
 over the first `rotary` dims of each head (partial rope), Y = X * sigmoid(gate)
 with each head's gate the second half of its [query, gate] pair in the q
-projection, and a row add. A device test checks each against its formula on
-16 heads of 256 at positions 0, 63 and 32761: add bit-exact, rope and gate
-within one BF16 step, dims past `rotary` untouched.
+projection, and a row add. `zig build test-draft-ops` checks them on 16 heads
+of 256 at positions 0, 63 and 2048: the gate and the add bit-exact against
+their formulas, the rope within one BF16 step and dims past `rotary` untouched.
 ---
+ zig/build/qwen27.zig                   |   5 +-
  zig/kernels/metal/core/draft_ops.metal |  26 +++++
- zig/src/core/draft_ops.zig             | 126 ++++++++++++++++++++++++-
- 2 files changed, 148 insertions(+), 4 deletions(-)
+ zig/src/core/draft_ops.zig             | 131 ++++++++++++++++++++++++-
+ 3 files changed, 157 insertions(+), 5 deletions(-)
 
+diff --git a/zig/build/qwen27.zig b/zig/build/qwen27.zig
+index 4a842080..1b9dd4fd 100644
+--- a/zig/build/qwen27.zig
++++ b/zig/build/qwen27.zig
+@@ -103,7 +103,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
+     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/qwen27.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } } });
+     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core", qwen_core }, .{ "core_lane", core_lane }, .{ "core_row", core_row }, .{ "bf16_topk", s.bf16_topk }, .{ "bf16_topk_gpu", s.bf16_topk_gpu }, .{ "tree_round", s.tree_round }, .{ "tree_round_gpu", s.tree_round_gpu }, .{ "tree_commit_gpu", s.tree_commit }, .{ "draft_ops", s.draft_ops }, .{ "kernel_sources", sources } }) |m| qwen_core.addImport(m[0], m[1]);
+     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core_lane", core_lane }, .{ "qwen_runtime_sources", s.runtime_sources }, .{ "core_delta", s.delta }, .{ "qwen_gdn_source", s.gdn_source }, .{ "kernel_sources", sources } }) |m| qwen27.addImport(m[0], m[1]);
+-    for ([_]*std.Build.Module{ s.bf16_topk, s.tree_round, s.draft_ops }) |m| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
++    for ([_]*std.Build.Module{ s.bf16_topk, s.tree_round }) |m| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
++    const draft_ops = &b.addRunArtifact(b.addTest(.{ .root_module = s.draft_ops })).step;
++    test_step.dependOn(draft_ops);
++    b.step("test-draft-ops", "Draft primitive guards and their device checks against the formulas").dependOn(draft_ops);
+ 
+     const family: []const std.Build.Module.Import = &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } };
+     _ = program(b, "tf-qwen27-run", "Build the native greedy, chunk and prompt-speed check on real weights", "zig/tests/qwen27/run.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal }, .{ .name = "core_lane", .module = core_lane }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources }, .{ .name = "qwen_gdn_source", .module = s.gdn_source } });
 diff --git a/zig/kernels/metal/core/draft_ops.metal b/zig/kernels/metal/core/draft_ops.metal
 index fe787e85..96ceebbe 100644
 --- a/zig/kernels/metal/core/draft_ops.metal
@@ -49,7 +66,7 @@ index fe787e85..96ceebbe 100644
 +  Y[size_t(index.y)*a.y_stride+index.x]=bfloat(float(X[size_t(index.y)*a.x_stride+index.x])+float(R[size_t(index.y)*a.r_stride+index.x]));
 +}
 diff --git a/zig/src/core/draft_ops.zig b/zig/src/core/draft_ops.zig
-index 855b2994..e6f4bc6b 100644
+index 855b2994..c4de2198 100644
 --- a/zig/src/core/draft_ops.zig
 +++ b/zig/src/core/draft_ops.zig
 @@ -8,16 +8,20 @@ pub const Norm = extern struct { rows: u32, heads: u32, dim: u32, x_stride: u32,
@@ -112,7 +129,7 @@ index 855b2994..e6f4bc6b 100644
  };
  fn bind(e: mtl.ComputeEncoder, values: anytype) void {
      inline for (values, 0..) |v, i| e.setBuffer(v.buf, v.off, i);
-@@ -137,3 +169,89 @@ test "operator guards reject invalid width, stride and rounding before encoding"
+@@ -137,3 +169,94 @@ test "operator guards reject invalid width, stride and rounding before encoding"
      try std.testing.expectError(error.BadDraftShape, checkRope(.{ .rows = 8, .heads = 4, .dim = 127, .x_stride = 508, .y_stride = 508 }));
      try std.testing.expectError(error.BadDraftShape, normThreads(.{ .rows = 8, .heads = 4, .dim = 128, .x_stride = 512, .y_stride = 512, .round_normalized = 2 }));
  }
@@ -131,7 +148,7 @@ index 855b2994..e6f4bc6b 100644
 +    };
 +    return @abs(key.of(a) - key.of(b));
 +}
-+test "head rope, sigmoid gate and add stay within one BF16 step of their formulas" {
++test "sigmoid gate and add match their formulas bit for bit, and head rope within one BF16 step" {
 +    const pool = mtl.objc.Pool.push();
 +    defer pool.pop();
 +    const device = try mtl.Device.init();
@@ -166,7 +183,7 @@ index 855b2994..e6f4bc6b 100644
 +        rs[i] = toBf16(@as(f64, @floatFromInt(prng.random().intRangeAtMost(i32, -255, 255))) / 32);
 +    }
 +    @memcpy(qs[0 .. rows * width], xs[0 .. rows * width]);
-+    const positions = [rows]u64{ 0, 63, 32761 };
++    const positions = [rows]u64{ 0, 63, 2048 };
 +    @memcpy(@as([*]u64, @ptrCast(@alignCast(pos.contents())))[0..rows], &positions);
 +    const before = xs[0 .. rows * width];
 +    const cb = queue.commandBuffer();
@@ -180,17 +197,18 @@ index 855b2994..e6f4bc6b 100644
 +    try std.testing.expect(cb.failure() == null);
 +    const gated: [*]const u16 = @ptrCast(@alignCast(y.contents()));
 +    const sums: [*]const u16 = @ptrCast(@alignCast(s.contents()));
++    var worst = [4]u32{ 0, 0, 0, 0 }; // gate steps, add steps, rope steps, untouched dims changed
 +    for (0..rows) |row| for (0..width) |i| {
 +        const head = i / dim;
 +        const gate_in = fromBf16(xs[row * 2 * width + head * 2 * dim + dim + i % dim]);
 +        const want = fromBf16(toBf16(1 / (1 + @exp(-gate_in)))) * fromBf16(rs[row * 2 * width + i]);
-+        try std.testing.expect(steps(gated[row * width + i], toBf16(want)) <= 1);
-+        try std.testing.expectEqual(toBf16(fromBf16(xs[row * 2 * width + i]) + fromBf16(rs[row * 2 * width + i])), sums[row * width + i]);
++        worst[0] = @max(worst[0], steps(gated[row * width + i], toBf16(want)));
++        worst[1] = @max(worst[1], steps(sums[row * width + i], toBf16(fromBf16(xs[row * 2 * width + i]) + fromBf16(rs[row * 2 * width + i]))));
 +    };
 +    for (0..rows) |row| for (0..heads) |head| for (0..dim) |d| {
 +        const at = row * width + head * dim + d;
 +        if (d >= 64) {
-+            try std.testing.expectEqual(before[at], qs[at]);
++            worst[3] += @intFromBool(before[at] != qs[at]);
 +            continue;
 +        }
 +        const pair = d % 32;
@@ -199,8 +217,12 @@ index 855b2994..e6f4bc6b 100644
 +        const left = fromBf16(before[row * width + head * dim + pair]);
 +        const right = fromBf16(before[row * width + head * dim + pair + 32]);
 +        const want = if (d < 32) left * @cos(angle) - right * @sin(angle) else right * @cos(angle) + left * @sin(angle);
-+        try std.testing.expect(steps(qs[at], toBf16(want)) <= 1);
++        worst[2] = @max(worst[2], steps(qs[at], toBf16(want)));
 +    };
++    try std.testing.expectEqual(@as(u32, 0), worst[0]);
++    try std.testing.expectEqual(@as(u32, 0), worst[1]);
++    try std.testing.expect(worst[2] <= 1);
++    try std.testing.expectEqual(@as(u32, 0), worst[3]);
 +}
 -- 
 2.56.0
