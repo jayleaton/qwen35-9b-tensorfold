@@ -1,0 +1,32 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 11:48:40 +0800
+Subject: [PATCH 45/47] qwen27: a seam tap records only at the plane its
+ drafter asked for
+
+A seam id (the embedding at 1000, then the normed input and the mixer's output)
+recorded at plane id - 1000 whether or not the drafter listed it, so a drafter
+tapping {1000, 31} had its last-layer plane overwritten by seam 1001. Seams now
+record only where the drafter's tap ids name them, like layer taps.
+---
+ zig/src/families/qwen27/taps.zig | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/zig/src/families/qwen27/taps.zig b/zig/src/families/qwen27/taps.zig
+index 128c9e96..d4c7d12e 100644
+--- a/zig/src/families/qwen27/taps.zig
++++ b/zig/src/families/qwen27/taps.zig
+@@ -121,8 +121,8 @@ pub const Taps = struct {
+ 
+     pub fn record(t: *Taps, glue: Glue, e: mtl.ComputeEncoder, layer: usize, hidden: Ref, rows: u32) !void {
+         if (rows == 0 or rows > t.capacity) return error.BadTapShape;
+-        const index = if (layer >= seam_base) layer - seam_base else std.mem.indexOfScalar(usize, t.ids[0..t.count], layer) orelse return;
+-        if (index >= t.count) return;
++        // a seam (the embedding, a mixer's input) records only where a drafter asked for it, at its own plane
++        const index = std.mem.indexOfScalar(usize, t.ids[0..t.count], layer) orelse return;
+         if (t.seen != 0 and rows != t.rows) return error.BadTapShape;
+         const bit = @as(u16, 1) << @intCast(index);
+         if (t.seen & bit != 0) return error.DuplicateTap;
+-- 
+2.56.0
+

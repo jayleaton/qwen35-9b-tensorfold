@@ -1,0 +1,229 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 12:11:14 +0800
+Subject: [PATCH 46/47] core: draft head rope, sigmoid gate and add kernels
+
+Three BF16 draft primitives for a gated attention block: an in-place NeoX rope
+over the first `rotary` dims of each head (partial rope), Y = X * sigmoid(gate)
+with each head's gate the second half of its [query, gate] pair in the q
+projection, and a row add. `zig build test-draft-ops` checks them on 16 heads
+of 256 at positions 0, 63 and 2048: the gate and the add bit-exact against
+their formulas, the rope within one BF16 step and dims past `rotary` untouched.
+---
+ zig/build/qwen27.zig                   |   5 +-
+ zig/kernels/metal/core/draft_ops.metal |  26 +++++
+ zig/src/core/draft_ops.zig             | 131 ++++++++++++++++++++++++-
+ 3 files changed, 157 insertions(+), 5 deletions(-)
+
+diff --git a/zig/build/qwen27.zig b/zig/build/qwen27.zig
+index 4a842080..1b9dd4fd 100644
+--- a/zig/build/qwen27.zig
++++ b/zig/build/qwen27.zig
+@@ -103,7 +103,10 @@ pub fn targets(b: *std.Build, target: std.Build.ResolvedTarget, optimize: std.bu
+     const qwen27 = b.createModule(.{ .root_source_file = b.path("zig/src/families/qwen27/qwen27.zig"), .target = target, .optimize = .ReleaseSafe, .link_libc = true, .imports = &.{ .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } } });
+     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core", qwen_core }, .{ "core_lane", core_lane }, .{ "core_row", core_row }, .{ "bf16_topk", s.bf16_topk }, .{ "bf16_topk_gpu", s.bf16_topk_gpu }, .{ "tree_round", s.tree_round }, .{ "tree_round_gpu", s.tree_round_gpu }, .{ "tree_commit_gpu", s.tree_commit }, .{ "draft_ops", s.draft_ops }, .{ "kernel_sources", sources } }) |m| qwen_core.addImport(m[0], m[1]);
+     for ([_]struct { []const u8, *std.Build.Module }{ .{ "core_lane", core_lane }, .{ "qwen_runtime_sources", s.runtime_sources }, .{ "core_delta", s.delta }, .{ "qwen_gdn_source", s.gdn_source }, .{ "kernel_sources", sources } }) |m| qwen27.addImport(m[0], m[1]);
+-    for ([_]*std.Build.Module{ s.bf16_topk, s.tree_round, s.draft_ops }) |m| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
++    for ([_]*std.Build.Module{ s.bf16_topk, s.tree_round }) |m| test_step.dependOn(&b.addRunArtifact(b.addTest(.{ .root_module = m })).step);
++    const draft_ops = &b.addRunArtifact(b.addTest(.{ .root_module = s.draft_ops })).step;
++    test_step.dependOn(draft_ops);
++    b.step("test-draft-ops", "Draft primitive guards and their device checks against the formulas").dependOn(draft_ops);
+ 
+     const family: []const std.Build.Module.Import = &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal } };
+     _ = program(b, "tf-qwen27-run", "Build the native greedy, chunk and prompt-speed check on real weights", "zig/tests/qwen27/run.zig", target, true, &.{ .{ .name = "qwen27", .module = qwen27 }, .{ .name = "core", .module = qwen_core }, .{ .name = "metal", .module = metal }, .{ .name = "core_lane", .module = core_lane }, .{ .name = "qwen_runtime_sources", .module = s.runtime_sources }, .{ .name = "qwen_gdn_source", .module = s.gdn_source } });
+diff --git a/zig/kernels/metal/core/draft_ops.metal b/zig/kernels/metal/core/draft_ops.metal
+index fe787e85..96ceebbe 100644
+--- a/zig/kernels/metal/core/draft_ops.metal
++++ b/zig/kernels/metal/core/draft_ops.metal
+@@ -67,3 +67,29 @@ kernel void tf_draft_swiglu(device const bfloat* G [[buffer(0)]],device const bf
+     Y[size_t(index.y)*a.y_stride+index.x]=bfloat(float(activation)*float(u));
+   }
+ }
++struct HeadRope { uint rows,heads,head_dim,rotary,stride; float theta; };
++// In place: the first `rotary` dims of each head turn as halves (NeoX); the rest of the head is left as it is.
++kernel void tf_head_rope(device bfloat* X [[buffer(0)]],device const ulong* positions [[buffer(1)]],constant HeadRope& a [[buffer(2)]],uint3 index [[thread_position_in_grid]]) {
++  const uint pairs=a.rotary/2;
++  if(index.x>=pairs||index.y>=a.heads||index.z>=a.rows)return;
++  const float angle=float(positions[index.z])*pow(a.theta,-float(index.x)/float(pairs));
++  const float cs=cos(angle),sn=sin(angle);
++  const size_t at=size_t(index.z)*a.stride+size_t(index.y)*a.head_dim+index.x;
++  const float left=float(X[at]),right=float(X[at+pairs]);
++  X[at]=bfloat(left*cs-right*sn);X[at+pairs]=bfloat(right*cs+left*sn);
++}
++struct Gate { uint rows,heads,head_dim,x_stride,gate_stride,y_stride; };
++// Y = X * sigmoid(gate): each head's gate is the second half of its [query, gate] pair in the q projection.
++kernel void tf_sigmoid_gate(device const bfloat* X [[buffer(0)]],device const bfloat* G [[buffer(1)]],constant Gate& a [[buffer(2)]],device bfloat* Y [[buffer(3)]],uint2 index [[thread_position_in_grid]]) {
++  const uint width=a.heads*a.head_dim;
++  if(index.x>=width||index.y>=a.rows)return;
++  const uint head=index.x/a.head_dim,col=index.x%a.head_dim;
++  const float g=float(G[size_t(index.y)*a.gate_stride+size_t(head)*2*a.head_dim+a.head_dim+col]);
++  const bfloat sigmoid=bfloat(1.0f/(1.0f+exp(-g)));
++  Y[size_t(index.y)*a.y_stride+index.x]=bfloat(float(X[size_t(index.y)*a.x_stride+index.x])*float(sigmoid));
++}
++struct Add { uint rows,width,x_stride,r_stride,y_stride; };
++kernel void tf_bf16_add(device const bfloat* X [[buffer(0)]],device const bfloat* R [[buffer(1)]],constant Add& a [[buffer(2)]],device bfloat* Y [[buffer(3)]],uint2 index [[thread_position_in_grid]]) {
++  if(index.x>=a.width||index.y>=a.rows)return;
++  Y[size_t(index.y)*a.y_stride+index.x]=bfloat(float(X[size_t(index.y)*a.x_stride+index.x])+float(R[size_t(index.y)*a.r_stride+index.x]));
++}
+diff --git a/zig/src/core/draft_ops.zig b/zig/src/core/draft_ops.zig
+index 855b2994..c4de2198 100644
+--- a/zig/src/core/draft_ops.zig
++++ b/zig/src/core/draft_ops.zig
+@@ -8,16 +8,20 @@ pub const Norm = extern struct { rows: u32, heads: u32, dim: u32, x_stride: u32,
+ pub const Conv = extern struct { rows: u32, width: u32, group: u32 = 16, block: u32 = 8, branch: u32, residual: u32 = 0, x_stride: u32, dynamic_stride: u32, y_stride: u32, rounding: u32 = 0 };
+ pub const Rope = extern struct { rows: u32, heads: u32, dim: u32, x_stride: u32, y_stride: u32, theta: f32 = 10000000 };
+ pub const Activation = extern struct { rows: u32, width: u32, gate_stride: u32, up_stride: u32, y_stride: u32, rounding: u32 = 0 };
+-const Kind = enum { linear, norm, conv, rope, swiglu };
++pub const HeadRope = extern struct { rows: u32, heads: u32, head_dim: u32, rotary: u32, stride: u32, theta: f32 = 10000000 };
++pub const Gate = extern struct { rows: u32, heads: u32, head_dim: u32, x_stride: u32, gate_stride: u32, y_stride: u32 };
++pub const Add = extern struct { rows: u32, width: u32, x_stride: u32, r_stride: u32, y_stride: u32 };
++const Kind = enum { linear, norm, conv, rope, swiglu, head_rope, gate, add };
++const names = [_][]const u8{ "tf_bf16_linear", "tf_draft_rms", "tf_dynamic_conv2", "tf_full_rope", "tf_draft_swiglu", "tf_head_rope", "tf_sigmoid_gate", "tf_bf16_add" };
+ pub const Ops = struct {
+-    pipes: [5]mtl.Pipeline,
++    pipes: [names.len]mtl.Pipeline,
+     pub fn init(device: mtl.Device) !Ops {
+         const lib = try mtl.Library.fromSource(device, source, mtl.CompileOptions.mlx());
+         defer lib.deinit();
+-        var pipes: [5]mtl.Pipeline = undefined;
++        var pipes: [names.len]mtl.Pipeline = undefined;
+         var count: usize = 0;
+         errdefer for (pipes[0..count]) |pipe| pipe.deinit();
+-        for (&pipes, [_][]const u8{ "tf_bf16_linear", "tf_draft_rms", "tf_dynamic_conv2", "tf_full_rope", "tf_draft_swiglu" }) |*pipe, name| {
++        for (&pipes, names) |*pipe, name| {
+             pipe.* = try mtl.Pipeline.init(device, lib, name, false);
+             count += 1;
+         }
+@@ -83,6 +87,34 @@ pub const Ops = struct {
+         e.setBuffer(out.buf, out.off, 3);
+         e.dispatchThreads(mtl.Size.of(p.width, p.rows, 1), mtl.Size.of(256, 1, 1));
+     }
++    /// In place: each head's first `rotary` dims of `x` turn at their row's position (partial NeoX rope).
++    pub fn headRope(ops: Ops, e: mtl.ComputeEncoder, x: Ref, positions: Ref, p: HeadRope) !void {
++        if (p.heads == 0 or p.rotary == 0 or p.rotary % 2 != 0 or p.rotary > p.head_dim or !std.math.isFinite(p.theta) or p.theta <= 0 or positions.off % 8 != 0) return error.BadDraftShape;
++        try check(x, try span(p.rows, p.stride, try std.math.mul(u32, p.heads, p.head_dim)));
++        try check(positions, @as(usize, p.rows) * 8);
++        e.setPipeline(ops.pipes[@backingInt(Kind.head_rope)]);
++        bind(e, .{ x, positions });
++        e.setValue(p, 2);
++        e.dispatchThreads(mtl.Size.of(p.rotary / 2, p.heads, p.rows), mtl.Size.of(32, 1, 1));
++    }
++    /// out = x * sigmoid(gate), each head's gate being the second half of its [query, gate] pair.
++    pub fn sigmoidGate(ops: Ops, e: mtl.ComputeEncoder, x: Ref, g: Ref, out: Ref, p: Gate) !void {
++        const width = try std.math.mul(u32, p.heads, p.head_dim);
++        try refs(out, try span(p.rows, p.y_stride, width), &.{ x, g }, &.{ try span(p.rows, p.x_stride, width), try span(p.rows, p.gate_stride, 2 * width) });
++        e.setPipeline(ops.pipes[@backingInt(Kind.gate)]);
++        bind(e, .{ x, g });
++        e.setValue(p, 2);
++        e.setBuffer(out.buf, out.off, 3);
++        e.dispatchThreads(mtl.Size.of(width, p.rows, 1), mtl.Size.of(256, 1, 1));
++    }
++    pub fn add(ops: Ops, e: mtl.ComputeEncoder, x: Ref, r: Ref, out: Ref, p: Add) !void {
++        try refs(out, try span(p.rows, p.y_stride, p.width), &.{ x, r }, &.{ try span(p.rows, p.x_stride, p.width), try span(p.rows, p.r_stride, p.width) });
++        e.setPipeline(ops.pipes[@backingInt(Kind.add)]);
++        bind(e, .{ x, r });
++        e.setValue(p, 2);
++        e.setBuffer(out.buf, out.off, 3);
++        e.dispatchThreads(mtl.Size.of(p.width, p.rows, 1), mtl.Size.of(256, 1, 1));
++    }
+ };
+ fn bind(e: mtl.ComputeEncoder, values: anytype) void {
+     inline for (values, 0..) |v, i| e.setBuffer(v.buf, v.off, i);
+@@ -137,3 +169,94 @@ test "operator guards reject invalid width, stride and rounding before encoding"
+     try std.testing.expectError(error.BadDraftShape, checkRope(.{ .rows = 8, .heads = 4, .dim = 127, .x_stride = 508, .y_stride = 508 }));
+     try std.testing.expectError(error.BadDraftShape, normThreads(.{ .rows = 8, .heads = 4, .dim = 128, .x_stride = 512, .y_stride = 512, .round_normalized = 2 }));
+ }
++fn toBf16(x: f64) u16 {
++    const bits: u32 = @bitCast(@as(f32, @floatCast(x)));
++    return @intCast((bits + 0x7fff + ((bits >> 16) & 1)) >> 16);
++}
++fn fromBf16(h: u16) f64 {
++    return @as(f32, @bitCast(@as(u32, h) << 16));
++}
++fn steps(a: u16, b: u16) u32 {
++    const key = struct {
++        fn of(h: u16) i32 {
++            return if (h & 0x8000 != 0) -@as(i32, h & 0x7fff) else h;
++        }
++    };
++    return @abs(key.of(a) - key.of(b));
++}
++test "sigmoid gate and add match their formulas bit for bit, and head rope within one BF16 step" {
++    const pool = mtl.objc.Pool.push();
++    defer pool.pop();
++    const device = try mtl.Device.init();
++    defer device.deinit();
++    const queue = try device.queue();
++    defer queue.deinit();
++    const ops = try Ops.init(device);
++    defer ops.deinit();
++    const rows = 3;
++    const heads = 16;
++    const dim = 256;
++    const width = heads * dim;
++    const shared = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
++    const x = try device.buffer(rows * 2 * width * 2, shared);
++    defer x.deinit();
++    const r = try device.buffer(rows * 2 * width * 2, shared);
++    defer r.deinit();
++    const y = try device.buffer(rows * width * 2, shared);
++    defer y.deinit();
++    const s = try device.buffer(rows * width * 2, shared);
++    defer s.deinit();
++    const q = try device.buffer(rows * width * 2, shared);
++    defer q.deinit();
++    const pos = try device.buffer(rows * 8, shared);
++    defer pos.deinit();
++    const xs: [*]u16 = @ptrCast(@alignCast(x.contents()));
++    const rs: [*]u16 = @ptrCast(@alignCast(r.contents()));
++    const qs: [*]u16 = @ptrCast(@alignCast(q.contents()));
++    var prng = std.Random.DefaultPrng.init(0x6d7470);
++    for (0..rows * 2 * width) |i| {
++        xs[i] = toBf16(@as(f64, @floatFromInt(prng.random().intRangeAtMost(i32, -255, 255))) / 64);
++        rs[i] = toBf16(@as(f64, @floatFromInt(prng.random().intRangeAtMost(i32, -255, 255))) / 32);
++    }
++    @memcpy(qs[0 .. rows * width], xs[0 .. rows * width]);
++    const positions = [rows]u64{ 0, 63, 2048 };
++    @memcpy(@as([*]u64, @ptrCast(@alignCast(pos.contents())))[0..rows], &positions);
++    const before = xs[0 .. rows * width];
++    const cb = queue.commandBuffer();
++    const e = cb.compute(.serial);
++    try ops.sigmoidGate(e, .{ .buf = r, .off = 0 }, .{ .buf = x }, .{ .buf = y }, .{ .rows = rows, .heads = heads, .head_dim = dim, .x_stride = 2 * width, .gate_stride = 2 * width, .y_stride = width });
++    try ops.add(e, .{ .buf = x }, .{ .buf = r }, .{ .buf = s }, .{ .rows = rows, .width = width, .x_stride = 2 * width, .r_stride = 2 * width, .y_stride = width });
++    try ops.headRope(e, .{ .buf = q }, .{ .buf = pos }, .{ .rows = rows, .heads = heads, .head_dim = dim, .rotary = 64, .stride = width, .theta = 10000000 });
++    e.end();
++    cb.commit();
++    cb.wait();
++    try std.testing.expect(cb.failure() == null);
++    const gated: [*]const u16 = @ptrCast(@alignCast(y.contents()));
++    const sums: [*]const u16 = @ptrCast(@alignCast(s.contents()));
++    var worst = [4]u32{ 0, 0, 0, 0 }; // gate steps, add steps, rope steps, untouched dims changed
++    for (0..rows) |row| for (0..width) |i| {
++        const head = i / dim;
++        const gate_in = fromBf16(xs[row * 2 * width + head * 2 * dim + dim + i % dim]);
++        const want = fromBf16(toBf16(1 / (1 + @exp(-gate_in)))) * fromBf16(rs[row * 2 * width + i]);
++        worst[0] = @max(worst[0], steps(gated[row * width + i], toBf16(want)));
++        worst[1] = @max(worst[1], steps(sums[row * width + i], toBf16(fromBf16(xs[row * 2 * width + i]) + fromBf16(rs[row * 2 * width + i]))));
++    };
++    for (0..rows) |row| for (0..heads) |head| for (0..dim) |d| {
++        const at = row * width + head * dim + d;
++        if (d >= 64) {
++            worst[3] += @intFromBool(before[at] != qs[at]);
++            continue;
++        }
++        const pair = d % 32;
++        // the angle is formed in fp32, as MLX's rope forms it
++        const angle: f64 = @as(f32, @floatFromInt(positions[row])) * std.math.pow(f32, 10000000, -@as(f32, @floatFromInt(pair)) / 32);
++        const left = fromBf16(before[row * width + head * dim + pair]);
++        const right = fromBf16(before[row * width + head * dim + pair + 32]);
++        const want = if (d < 32) left * @cos(angle) - right * @sin(angle) else right * @cos(angle) + left * @sin(angle);
++        worst[2] = @max(worst[2], steps(qs[at], toBf16(want)));
++    };
++    try std.testing.expectEqual(@as(u32, 0), worst[0]);
++    try std.testing.expectEqual(@as(u32, 0), worst[1]);
++    try std.testing.expect(worst[2] <= 1);
++    try std.testing.expectEqual(@as(u32, 0), worst[3]);
++}
+-- 
+2.56.0
+
