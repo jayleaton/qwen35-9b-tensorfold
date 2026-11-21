@@ -7,7 +7,7 @@ series applied in order where it has one. The pin, the series and the resulting 
 | --- | --- | --- | --- | --- |
 | `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0031` | `10b9ba30123fa33a2390c9f7944abdfa14d4ec98` | DGX Spark |
 | `rtx` | same | `cuda:0022 rtx:0003` | `64ba7d4085cc4742c127af91fa196218b189bdbf` | 16 GB RTX |
-| `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0044` | `d33e2d93ea37f0b3ed1f208599a24ac00b3de16e` | Macs |
+| `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0047` | `58d149eddd72fba53b8ce93f7e2e2fd0ccacf5c2` | Macs |
 | `hip` | `813ff4ccbf9d6610e991a96d53fda2b628f56347` | none | `f70d190f1d1bd65575a53f7eb06838c7acf97cfc` | Ally X ([HIP](HIP.md)) |
 | `upstream` | `727153cb33876173efb256d60a12e69413cf1248` | none | `c4e66e4220a8c650d1d94b0fdda4906d6dced988` | control |
 
@@ -21,8 +21,9 @@ builds `libtfgrammar`.
 ## Why these series for a stock checkpoint
 
 The series were written for [SenseNova-Loop-9B](https://github.com/jayleaton/sensenova-loop9b-tensorfold), a looped
-Qwen3.5-9B. They are reused byte for byte, so the `cuda` (through `0027`) and `metal` trees are ones already checked
-there. Two parts are added here: `rtx` `0003`, and `cuda` `0028`-`0031` for MTP drafting. Their loop and mHC code runs only for a checkpoint with `loop_settings`; stock
+Qwen3.5-9B. They are reused byte for byte, so the `cuda` (through `0027`) and `metal` (through `0044`) trees are ones
+already checked there. Three parts are added here: `rtx` `0003`, `cuda` `0028`-`0031` and `metal` `0045`-`0047`, the
+last two for MTP drafting. Their loop and mHC code runs only for a checkpoint with `loop_settings`; stock
 Qwen3.5-9B has none and takes the plain `qwen3_5` path. What the stock model uses from them:
 
 | patches | what stock Qwen3.5-9B gets | on upstream `main` (`727153cb3`) |
@@ -41,6 +42,7 @@ Qwen3.5-9B has none and takes the plain `qwen3_5` path. What the stock model use
 | `cuda` `0008`, `metal` `0002`, `0004`, `0035`, `0037` | the converter, `tools/sensenova_loop_mlx.py` | no Qwen3.5 converter in `tools/` |
 | `metal` `0034` | a startup margin that scales with the working set (16 GB Macs) | |
 | `metal` `0040`-`0043` | macOS 26 (MSL 4.0) compiles the library; lone streams propose copy drafts; copy drafts on by default | |
+| `metal` `0045`-`0047` | new for this recipe: the checkpoint's MTP head drafts on Metal (`--drafter` a head directory from `scripts/mtp-head.sh`), token-identical to `"draft": false` ([METAL](METAL.md)) | Metal has no `qwen3_5` MTP reader |
 
 `cuda` `0001`-`0003`, `0005`-`0007`, `0009`-`0012` and `0023` are the loop, the mHC and their image path: present in the
 tree, idle for this checkpoint. The full patch-by-patch list is in the
