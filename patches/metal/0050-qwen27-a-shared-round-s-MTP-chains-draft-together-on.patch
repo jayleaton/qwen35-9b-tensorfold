@@ -1,0 +1,498 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
+Date: Sat, 21 Nov 2026 16:11:29 +0800
+Subject: [PATCH] qwen27: a shared round's MTP chains draft together, one frame
+ a step
+
+A shared round drafted each stream's MTP chain in turn, one GPU frame per
+draft, and each frame's single-row attention ran 16 threadgroups, so four
+chats spent about 12 ms a round drafting against a 9 ms verify of all their
+rows. The chains now step together: one frame drafts the next token of every
+chain still going, and their attentions run as one, keys side by side under a
+per-row mask (the head's own 4-window attention). The slots' early taps gathers
+share one pass. A lone chain takes the same kernels and mask as before.
+
+M5 Ultra, Qwen3.5-9B q4, served greedy, drafted / "draft": false, every reply
+token-identical: 4 chats x 1K 303 -> 364 tok/s aggregate (plain 306), drafting
+12.6 -> 7.7 ms a round before the shared gather; one chat 1K 228, 4K 197, 8K 203, 32K 171, re-quote
+1,015, code edit 451, story 213, as before.
+---
+ zig/src/families/qwen27/dflash/mtp.zig        | 245 ++++++++++++------
+ .../families/qwen27/dflash/runtime_model.zig  |  38 ++-
+ zig/src/native/qwen27_drafts.zig              |  39 ++-
+ 3 files changed, 211 insertions(+), 111 deletions(-)
+
+diff --git a/zig/src/families/qwen27/dflash/mtp.zig b/zig/src/families/qwen27/dflash/mtp.zig
+index 41b80602..ff4e4975 100644
+--- a/zig/src/families/qwen27/dflash/mtp.zig
++++ b/zig/src/families/qwen27/dflash/mtp.zig
+@@ -9,6 +9,10 @@ const backend_mod = @import("runtime_backend.zig");
+ const selector = @import("selector.zig");
+ const Backend = backend_mod.Backend;
+ const Ref = backend_mod.Ref;
++const Cache = backend_mod.Cache;
++/// Streams one batched chain step drafts for, each in its own rows of the chain buffers.
++pub const max_chains = 8;
++const together_windows = 4;
+ const opts = mtl.ResourceOptions.shared | mtl.ResourceOptions.untracked;
+ 
+ /// The head's norms, each folded from the checkpoint's zero-centred `1 + w` into one bf16 buffer.
+@@ -23,10 +27,12 @@ pub const Head = struct {
+     norm_at: [norm_names.len]usize,
+     /// The target's own final norm (stored folded), which the target's head reads its last layer through.
+     target_norm: Ref,
+-    /// A chain's rows: each row's keys and values, which later rows attend, and the newest row's normed output.
++    /// Each chain's rows, max_chains of them: keys and values that later rows attend, and the newest row's output.
+     chain_k: mtl.Buffer,
+     chain_v: mtl.Buffer,
+     state: mtl.Buffer,
++    /// One attention for chains side by side, up to `together_windows` contexts' keys.
++    together: core.shared_attention.Attention,
+ 
+     pub fn load(b: *Backend) !Head {
+         const c = b.config;
+@@ -56,12 +62,14 @@ pub const Head = struct {
+         const final = try b.target.checkpoint.get(try std.fmt.bufPrint(&name_buf, "{s}model.norm.weight", .{prefix}));
+         if (final.rank != 1 or final.shape[0] != c.hidden or final.dtype != .bf16) return error.BadMtpHead;
+         h.target_norm = .{ .buf = final.buffer, .off = final.offset };
+-        const rows = cfg.mtp_max_depth + 1;
++        const rows = max_chains * (cfg.mtp_max_depth + 1);
+         h.chain_k = try b.target.device.buffer(@as(usize, rows) * c.kvWidth() * 2, opts);
+         errdefer h.chain_k.deinit();
+         h.chain_v = try b.target.device.buffer(@as(usize, rows) * c.kvWidth() * 2, opts);
+         errdefer h.chain_v.deinit();
+-        h.state = try b.target.device.buffer(@as(usize, c.hidden) * 2, opts);
++        h.state = try b.target.device.buffer(@as(usize, max_chains) * c.hidden * 2, opts);
++        errdefer h.state.deinit();
++        h.together = try core.shared_attention.Attention.init(b.allocator, b.target.device, .{ .query_heads = c.heads, .kv_heads = c.kv_heads, .head_dim = c.head_dim, .capacity = together_windows * (c.window + 16), .output = .bf16 });
+         return h;
+     }
+     pub fn deinit(h: *Head) void {
+@@ -69,6 +77,7 @@ pub const Head = struct {
+         h.chain_k.deinit();
+         h.chain_v.deinit();
+         h.state.deinit();
++        h.together.deinit();
+     }
+     fn normRef(h: *const Head, n: Norm) Ref {
+         return .{ .buf = h.norms, .off = h.norm_at[@backingInt(n)] };
+@@ -168,83 +177,129 @@ pub fn absorb(b: *Backend, h: *const Head, mode: op.Mode, ring: mtl.Buffer, cont
+     }
+ }
+ 
+-/// One query row against the context's cached keys and the chain's own rows [0, own).
+-fn attendOne(b: *Backend, e: mtl.ComputeEncoder, context: op.Context, q: Ref, h: *const Head, own: u32, out: Ref) !void {
++/// Chains from `first_chain` in one attention, keys side by side: each row sees its context and own rows [0, own).
++fn attendRows(b: *Backend, e: mtl.ComputeEncoder, chains_in: []const Chain, first_chain: usize, q: Ref, h: *const Head, own: u32, out: Ref) !void {
+     const c = b.config;
+     const width = c.kvWidth();
+-    const context_rows: u32 = @intCast(context.end - context.begin);
+-    const keys = context_rows + own;
++    const rows_each = cfg.mtp_max_depth + 1;
++    var keys: u32 = 0;
++    for (chains_in) |ch| keys += @as(u32, @intCast(ch.context.end - ch.context.begin)) + own;
+     const merged_k = try b.frame.alloc(keys, width, .bf16);
+     const merged_v = try b.frame.alloc(keys, width, .bf16);
+     const k = try b.frame.ref(merged_k);
+     const v = try b.frame.ref(merged_v);
+-    if (context_rows > 0) {
+-        const at: u32 = @intCast(context.begin % c.window);
+-        const first = @min(context_rows, c.window - at);
+-        for ([_]mtl.Buffer{ b.caches[0].keys, b.caches[0].values }, [_]Ref{ k, v }) |cache, to| {
+-            try b.copy(e, .{ .buf = cache, .off = @as(usize, at) * width * 2 }, to, first, width);
+-            if (first < context_rows) try b.copy(e, .{ .buf = cache }, .{ .buf = to.buf, .off = to.off + @as(usize, first) * width * 2 }, context_rows - first, width);
++    const rows: u32 = @intCast(chains_in.len);
++    const mask = try b.frame.alloc(rows, keys, .u8);
++    const m = try b.frame.ref(mask);
++    const visible = m.buf.contents()[m.off..][0 .. @as(usize, rows) * keys];
++    @memset(visible, 0);
++    var at_key: usize = 0;
++    for (chains_in, 0..) |ch, row| {
++        const context_rows: u32 = @intCast(ch.context.end - ch.context.begin);
++        const base = at_key * width * 2;
++        if (context_rows > 0) {
++            const at: u32 = @intCast(ch.context.begin % c.window);
++            const head = @min(context_rows, c.window - at);
++            for ([_]mtl.Buffer{ ch.cache.keys, ch.cache.values }, [_]Ref{ k, v }) |buf, to| {
++                try b.copy(e, .{ .buf = buf, .off = @as(usize, at) * width * 2 }, .{ .buf = to.buf, .off = to.off + base }, head, width);
++                if (head < context_rows) try b.copy(e, .{ .buf = buf }, .{ .buf = to.buf, .off = to.off + base + @as(usize, head) * width * 2 }, context_rows - head, width);
++            }
+         }
++        const off = base + @as(usize, context_rows) * width * 2;
++        const own_at = (first_chain + row) * rows_each * width * 2;
++        try b.copy(e, .{ .buf = h.chain_k, .off = own_at }, .{ .buf = k.buf, .off = k.off + off }, own, width);
++        try b.copy(e, .{ .buf = h.chain_v, .off = own_at }, .{ .buf = v.buf, .off = v.off + off }, own, width);
++        @memset(visible[row * keys + at_key ..][0 .. context_rows + own], 1);
++        at_key += context_rows + own;
+     }
+-    const off = @as(usize, context_rows) * width * 2;
+-    try b.copy(e, .{ .buf = h.chain_k }, .{ .buf = k.buf, .off = k.off + off }, own, width);
+-    try b.copy(e, .{ .buf = h.chain_v }, .{ .buf = v.buf, .off = v.off + off }, own, width);
+-    const mask = try b.frame.alloc(1, keys, .u8);
+-    const m = try b.frame.ref(mask);
+-    @memset(m.buf.contents()[m.off..][0..keys], 1);
+     const scale = 1.0 / @sqrt(@as(f32, @floatFromInt(c.head_dim)));
+     const R = core.shared_attention.Ref;
+     const views = [_]R{ .{ .buf = q.buf, .off = q.off }, .{ .buf = k.buf, .off = k.off }, .{ .buf = v.buf, .off = v.off }, .{ .buf = m.buf, .off = m.off }, .{ .buf = out.buf, .off = out.off } };
+-    if (keys > 1024) try b.attention.encodeSplit(e, 1, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]) else try b.attention.encode(e, 1, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]);
++    if (keys > 1024) try h.together.encodeSplit(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]) else try h.together.encode(e, rows, keys, keys, scale, views[0], views[1], views[2], views[3], views[4]);
+     e.barrier();
+ }
+ 
+-/// One chain row at `position` (keys and values in chain row `index`): its draft and that draft's log-probability.
+-fn chainRow(b: *Backend, h: *const Head, mode: op.Mode, context: op.Context, input: Ref, input_stride: u32, target_normed: bool, token: u32, position: u64, index: u32) !struct { token: u32, logp: f64 } {
++/// A chain being drafted: its taps ring, cached context and K/V cache, the row after its last committed one.
++pub const Chain = struct { ring: mtl.Buffer, context: op.Context, cache: Cache, end: u64 };
++const Pick = struct { token: u32, logp: f64 };
++
++/// Chain step `step` of every chain in one frame: each one's draft after `tokens[k]` and that draft's log-probability.
++fn chainRows(b: *Backend, h: *const Head, mode: op.Mode, chains_in: []const Chain, step: u32, tokens: []const u32, picks: []Pick) !void {
+     const c = b.config;
++    const n: u32 = @intCast(chains_in.len);
++    const rows_each = cfg.mtp_max_depth + 1;
+     const ops = b.ops();
+     const epoch = try ops.vtable.begin(ops.ptr);
+     defer ops.vtable.release(ops.ptr, epoch);
+-    const hidden = try b.frame.add(input, 1, c.hidden, input_stride, .bf16);
+-    const ids = [_]u32{token};
+-    const emb = try ops.vtable.embed(ops.ptr, epoch, undefined, &ids);
+-    const pos = [_]u64{position};
+-    const r = try kvRows(b, h, epoch, mode, hidden, target_normed, emb, &pos);
++    const window: u64 = c.window;
++    const stride = c.tapWidth();
++    // the first step reads each chain's last committed state from its ring; later ones the previous step's outputs
++    const hidden = if (step == 0) blk: {
++        const v = try b.frame.alloc(n, c.hidden, .bf16);
++        const to = try b.frame.ref(v);
++        const e = try b.encoder(epoch);
++        for (chains_in, 0..) |ch, k| try b.copy(e, .{ .buf = ch.ring, .off = (@as(usize, @intCast((ch.end - 1) % window)) * stride + c.hidden) * 2 }, .{ .buf = to.buf, .off = to.off + k * @as(usize, c.hidden) * 2 }, 1, c.hidden);
++        break :blk v;
++    } else try b.frame.add(.{ .buf = h.state }, n, c.hidden, c.hidden, .bf16);
++    const emb = try ops.vtable.embed(ops.ptr, epoch, undefined, tokens);
++    var pos: [max_chains]u64 = undefined;
++    for (pos[0..n], chains_in) |*p, ch| p.* = ch.end - 1 + step;
++    const r = try kvRows(b, h, epoch, mode, hidden, step == 0, emb, pos[0..n]);
+     var e = try b.encoder(epoch);
+     const width = c.kvWidth();
+-    try b.copy(e, try b.frame.ref(r.k), .{ .buf = h.chain_k, .off = @as(usize, index) * width * 2 }, 1, width);
+-    try b.copy(e, try b.frame.ref(r.v), .{ .buf = h.chain_v, .off = @as(usize, index) * width * 2 }, 1, width);
++    const kr = try b.frame.ref(r.k);
++    const vr = try b.frame.ref(r.v);
++    for (0..n) |k| {
++        const at = (k * rows_each + step) * width * 2;
++        try b.copy(e, .{ .buf = kr.buf, .off = kr.off + k * width * 2 }, .{ .buf = h.chain_k, .off = at }, 1, width);
++        try b.copy(e, .{ .buf = vr.buf, .off = vr.off + k * width * 2 }, .{ .buf = h.chain_v, .off = at }, 1, width);
++    }
+     const qraw = try project(b, epoch, mode, r.a, h.linears[@backingInt(Linear.q)]);
+     // q_proj's rows hold [query, gate] a head: the query halves are normed into contiguous heads
+-    const q = try b.frame.alloc(1, c.qWidth(), .bf16);
++    const q = try b.frame.alloc(n, c.qWidth(), .bf16);
+     e = try b.encoder(epoch);
+-    try rmsInto(b, e, try b.frame.ref(qraw), 2 * c.head_dim, h.normRef(.q), try b.frame.ref(q), c.head_dim, c.heads, 1, c.head_dim);
+-    try rotate(b, epoch, q, c.heads, &pos);
+-    const att = try b.frame.alloc(1, c.qWidth(), .bf16);
++    try rmsInto(b, e, try b.frame.ref(qraw), 2 * c.head_dim, h.normRef(.q), try b.frame.ref(q), c.head_dim, n * c.heads, 1, c.head_dim);
++    try rotate(b, epoch, q, c.heads, pos[0..n]);
++    const att = try b.frame.alloc(n, c.qWidth(), .bf16);
+     e = try b.encoder(epoch);
+-    try attendOne(b, e, context, try b.frame.ref(q), h, index + 1, try b.frame.ref(att));
+-    const gated = try b.frame.alloc(1, c.qWidth(), .bf16);
++    const qr = try b.frame.ref(q);
++    const ar = try b.frame.ref(att);
++    const q_bytes = @as(usize, c.qWidth()) * 2;
++    // chains share an attention while their keys fit its capacity
++    var first: usize = 0;
++    while (first < n) {
++        var last = first;
++        var keys: u64 = 0;
++        while (last < n) : (last += 1) {
++            const more = chains_in[last].context.end - chains_in[last].context.begin + step + 1;
++            if (last > first and keys + more > h.together.shape.capacity) break;
++            keys += more;
++        }
++        try attendRows(b, e, chains_in[first..last], first, .{ .buf = qr.buf, .off = qr.off + first * q_bytes }, h, step + 1, .{ .buf = ar.buf, .off = ar.off + first * q_bytes });
++        first = last;
++    }
++    const gated = try b.frame.alloc(n, c.qWidth(), .bf16);
+     e = try b.encoder(epoch);
+-    try b.primitives.sigmoidGate(e, try b.frame.ref(att), try b.frame.ref(qraw), try b.frame.ref(gated), .{ .rows = 1, .heads = c.heads, .head_dim = c.head_dim, .x_stride = att.stride, .gate_stride = qraw.stride, .y_stride = gated.stride });
++    try b.primitives.sigmoidGate(e, try b.frame.ref(att), try b.frame.ref(qraw), try b.frame.ref(gated), .{ .rows = n, .heads = c.heads, .head_dim = c.head_dim, .x_stride = att.stride, .gate_stride = qraw.stride, .y_stride = gated.stride });
+     e.barrier();
+     const o = try project(b, epoch, mode, gated, h.linears[@backingInt(Linear.o)]);
+     const h2 = try addRows(b, epoch, r.h, o);
+-    const a2 = try b.frame.alloc(1, c.hidden, .bf16);
++    const a2 = try b.frame.alloc(n, c.hidden, .bf16);
+     e = try b.encoder(epoch);
+-    try rmsInto(b, e, try b.frame.ref(h2), h2.stride, h.normRef(.post), try b.frame.ref(a2), a2.stride, 1, 1, c.hidden);
++    try rmsInto(b, e, try b.frame.ref(h2), h2.stride, h.normRef(.post), try b.frame.ref(a2), a2.stride, n, 1, c.hidden);
+     const g = try project(b, epoch, mode, a2, h.linears[@backingInt(Linear.gate)]);
+     const u = try project(b, epoch, mode, a2, h.linears[@backingInt(Linear.up)]);
+     const s = try ops.vtable.swiglu(ops.ptr, epoch, g, u);
+     const d = try project(b, epoch, mode, s, h.linears[@backingInt(Linear.down)]);
+     const h3 = try addRows(b, epoch, h2, d);
+-    const x = try b.frame.add(.{ .buf = h.state }, 1, c.hidden, c.hidden, .bf16);
++    const x = try b.frame.add(.{ .buf = h.state }, n, c.hidden, c.hidden, .bf16);
+     e = try b.encoder(epoch);
+-    try rmsInto(b, e, try b.frame.ref(h3), h3.stride, h.normRef(.final), try b.frame.ref(x), x.stride, 1, 1, c.hidden);
++    try rmsInto(b, e, try b.frame.ref(h3), h3.stride, h.normRef(.final), try b.frame.ref(x), x.stride, n, 1, c.hidden);
+     const head = try ops.vtable.head(ops.ptr, epoch, x);
+-    const picked = try b.frame.alloc(1, @sizeOf(core.bf16_topk.Row), .u8);
++    const picked = try b.frame.alloc(n, @sizeOf(core.bf16_topk.Row), .u8);
+     const logits = try b.frame.ref(head.logits);
+     const out = try b.frame.ref(picked);
+-    const params = core.bf16_topk.Params{ .rows = 1, .vocab = head.logits.width, .k = c.topk, .stride = head.logits.stride };
++    const params = core.bf16_topk.Params{ .rows = n, .vocab = head.logits.width, .k = c.topk, .stride = head.logits.stride };
+     _ = try b.encoder(epoch);
+     try b.topk.encode(b.frame.encoder, .{ .buf = logits.buf, .off = logits.off }, .{ .buf = out.buf, .off = out.off }, params);
+     b.frame.encoder.barrier();
+@@ -252,18 +307,20 @@ fn chainRow(b: *Backend, h: *const Head, mode: op.Mode, context: op.Context, inp
+         b.failed = true;
+         return err;
+     };
+-    const raw: *const core.bf16_topk.Row = @ptrCast(@alignCast(out.buf.contents() + out.off));
+-    const entries = try core.bf16_topk.decode(raw, params);
+-    if (entries.len == 0) return error.MtpNoCandidate;
+-    // the head's top candidates stand in for its whole vocabulary in the draft's probability
+-    var sum: f64 = 0;
+-    for (entries) |en| sum += @exp(@as(f64, en.score) - entries[0].score);
+-    const top = entries[0].token;
+-    const id = if (head.token_ids) |t| blk: {
+-        const tr = try b.frame.ref(t);
+-        break :blk std.mem.readInt(u32, tr.buf.contents()[tr.off + @as(usize, top) * 4 ..][0..4], .little);
+-    } else top;
+-    return .{ .token = id, .logp = -@log(sum) };
++    for (picks[0..n], 0..) |*pick, k| {
++        const raw: *const core.bf16_topk.Row = @ptrCast(@alignCast(out.buf.contents() + out.off + k * @sizeOf(core.bf16_topk.Row)));
++        const entries = try core.bf16_topk.decode(raw, params);
++        if (entries.len == 0) return error.MtpNoCandidate;
++        // the head's top candidates stand in for its whole vocabulary in the draft's probability
++        var sum: f64 = 0;
++        for (entries) |en| sum += @exp(@as(f64, en.score) - entries[0].score);
++        const top = entries[0].token;
++        const id = if (head.token_ids) |t| blk: {
++            const tr = try b.frame.ref(t);
++            break :blk std.mem.readInt(u32, tr.buf.contents()[tr.off + @as(usize, top) * 4 ..][0..4], .little);
++        } else top;
++        pick.* = .{ .token = id, .logp = -@log(sum) };
++    }
+ }
+ 
+ fn addRows(b: *Backend, epoch: u64, x: op.View, r: op.View) !op.View {
+@@ -276,41 +333,57 @@ fn addRows(b: *Backend, epoch: u64, x: op.View, r: op.View) !op.View {
+ 
+ /// Up to `depth` drafts after `pending` from row end - 1, stopping once the chain probability falls under the cut.
+ pub fn chain(gpa: std.mem.Allocator, b: *Backend, h: *const Head, mode: op.Mode, ring: mtl.Buffer, context: op.Context, end: u64, pending: u32, depth: u32) !selector.Tree {
+-    const c = b.config;
++    var out: [1]selector.Tree = undefined;
++    try chains(gpa, b, h, mode, &.{.{ .ring = ring, .context = context, .cache = b.caches[0], .end = end }}, &.{pending}, &.{depth}, &out);
++    return out[0];
++}
++
++/// Each chain's drafts, as `chain` drafts them alone: one frame a step for all of them, until every chain has stopped.
++pub fn chains(gpa: std.mem.Allocator, b: *Backend, h: *const Head, mode: op.Mode, in: []const Chain, pending: []const u32, depths: []const u32, out: []selector.Tree) !void {
++    const n = in.len;
++    if (n == 0 or n > max_chains or pending.len != n or depths.len != n or out.len != n) return error.BadDraftContext;
+     const cap = @min(cfg.mtp_max_depth, try @import("sys").environment.read(u32, "TF_QWEN27_MTP_DEPTH", cfg.mtp_default_depth));
+-    const n = @min(depth, cap);
+     const cut = @log(@max(try @import("sys").environment.read(f64, "TF_QWEN27_MTP_CONFIDENCE", cfg.mtp_default_confidence), std.math.floatMin(f64)));
+-    var tree = selector.Tree{ .gpa = gpa, .tokens = try gpa.alloc(u32, n), .parents = &.{}, .scores = &.{} };
+-    errdefer gpa.free(tree.tokens);
+-    tree.parents = try gpa.alloc(i32, n);
+-    errdefer gpa.free(tree.parents);
+-    tree.scores = try gpa.alloc(f64, n);
+-    errdefer gpa.free(tree.scores);
+-    if (n == 0) return tree;
+-    if (end == 0 or context.end + 1 != end) return error.BadDraftContext;
+-    b.context = context;
+-    const window: u64 = c.window;
+-    const stride = c.tapWidth();
+-    const last = end - 1;
+-    var token = pending;
+-    var total: f64 = 0;
+-    var kept: usize = n;
+-    for (0..n) |i| {
++    var made: usize = 0;
++    errdefer for (out[0..made]) |*t| t.deinit();
++    var steps: u32 = 0;
++    var tokens: [max_chains]u32 = undefined;
++    var totals: [max_chains]f64 = @splat(0);
++    var kept: [max_chains]usize = undefined;
++    var live: usize = 0;
++    for (pending, depths, out, 0..) |p, depth, *t, k| {
++        const len = @min(depth, cap);
++        t.* = .{ .gpa = gpa, .tokens = try gpa.alloc(u32, len), .parents = &.{}, .scores = &.{} };
++        made += 1;
++        t.parents = try gpa.alloc(i32, len);
++        t.scores = try gpa.alloc(f64, len);
++        tokens[k] = p;
++        kept[k] = len;
++        steps = @max(steps, len);
++        live += @intFromBool(len > 0);
++    }
++    // a chain with no drafts left rides along with the others' steps, so every one needs its context
++    if (steps > 0) for (in) |ch| if (ch.end == 0 or ch.context.end + 1 != ch.end) return error.BadDraftContext;
++    b.context = in[0].context;
++    var picks: [max_chains]Pick = undefined;
++    for (0..steps) |i| {
++        if (live == 0) break;
+         const step: u32 = @intCast(i);
+-        const input: Ref = if (i == 0) .{ .buf = ring, .off = (@as(usize, @intCast(last % window)) * stride + c.hidden) * 2 } else .{ .buf = h.state };
+-        const row = try chainRow(b, h, mode, context, input, if (i == 0) stride else c.hidden, i == 0, token, last + step, step);
+-        total += row.logp;
+-        tree.tokens[i] = row.token;
+-        tree.parents[i] = @as(i32, @intCast(i)) - 1;
+-        tree.scores[i] = total;
+-        token = row.token;
+-        if (total < cut) {
+-            kept = i + 1;
+-            break;
++        try chainRows(b, h, mode, in, step, tokens[0..n], picks[0..n]);
++        for (out, picks[0..n], 0..) |*t, pick, k| {
++            if (i >= kept[k]) continue; // stopped: its row rode along
++            totals[k] += pick.logp;
++            t.tokens[i] = pick.token;
++            t.parents[i] = @as(i32, @intCast(step)) - 1;
++            t.scores[i] = totals[k];
++            tokens[k] = pick.token;
++            if (totals[k] < cut) kept[k] = i + 1;
++            if (i + 1 == kept[k]) live -= 1;
+         }
+     }
+-    tree.tokens = try gpa.realloc(tree.tokens, kept);
+-    tree.parents = try gpa.realloc(tree.parents, kept);
+-    tree.scores = try gpa.realloc(tree.scores, kept);
+-    return tree;
++    for (out, kept[0..n]) |*t, len| {
++        t.tokens = try gpa.realloc(t.tokens, len);
++        t.parents = try gpa.realloc(t.parents, len);
++        t.scores = try gpa.realloc(t.scores, len);
++    }
+ }
+diff --git a/zig/src/families/qwen27/dflash/runtime_model.zig b/zig/src/families/qwen27/dflash/runtime_model.zig
+index 5f0d7dba..f89be910 100644
+--- a/zig/src/families/qwen27/dflash/runtime_model.zig
++++ b/zig/src/families/qwen27/dflash/runtime_model.zig
+@@ -236,25 +236,35 @@ pub const Model = struct {
+             made += 1;
+         }
+     }
+-    /// Each stream's chain in turn, its context swapped in for its proposal and back out.
++    /// Every stream's chain drafted together, one frame a step; each context is flushed while it is swapped in.
+     fn chains(m: *Model, entries: []const Proposal, out: []selector.Tree) !void {
+-        var made: usize = 0;
+-        errdefer for (out[0..made]) |*t| t.deinit();
+-        for (entries, out) |en, *t| {
+-            const x = en.context orelse {
+-                t.* = try m.proposeOptions(en.pending, selection(en));
+-                made += 1;
+-                continue;
+-            };
+-            try m.swap(x);
+-            const tree = m.proposeOptions(en.pending, selection(en));
+-            m.swap(x) catch {
++        const metric = mtl.pass_metrics.phase(.drafter);
++        defer metric.end();
++        const h = &m.head.?;
++        var in: [mtp.max_chains]mtp.Chain = undefined;
++        var pending: [mtp.max_chains]u32 = undefined;
++        var depths: [mtp.max_chains]u32 = undefined;
++        for (entries, 0..) |en, k| {
++            if (en.pending >= m.graph.config.vocab or en.nodes > max_nodes) return error.BadDraftOptions;
++            if (en.context) |x| try m.swap(x);
++            const flushed = m.ready();
++            in[k] = .{ .ring = m.pending, .context = m.session.context, .cache = m.backend.caches[0], .end = m.committed_end };
++            if (en.context) |x| m.swap(x) catch {
+                 m.backend.failed = true; // the model holds this stream's context: recovery resets both
+                 return error.DraftContextSwap;
+             };
+-            t.* = try tree;
+-            made += 1;
++            try flushed;
++            pending[k] = en.pending;
++            depths[k] = en.nodes;
+         }
++        try mtp.chains(m.allocator, &m.backend, h, m.preparation.mode, in[0..entries.len], pending[0..entries.len], depths[0..entries.len], out);
++        m.backend.context = m.session.context;
++    }
++    /// The head's context brought up to the committed rows, as a chain proposal needs it.
++    fn ready(m: *Model) !void {
++        if (m.backend.failed or m.backend.frame.active or m.backend.transaction != null) return error.BadDraftOptions;
++        if (m.committed_end == 0) return error.DraftContextNotReady;
++        try m.flush();
+     }
+     /// A short run of committed taps the session lacks, for a batched frame to absorb (null: none, or flush first).
+     const Fresh = struct { ring: mtl.Buffer, slot: u32, rows: u32, first: u64, next: op.Context };
+diff --git a/zig/src/native/qwen27_drafts.zig b/zig/src/native/qwen27_drafts.zig
+index 4607400f..af7917a1 100644
+--- a/zig/src/native/qwen27_drafts.zig
++++ b/zig/src/native/qwen27_drafts.zig
+@@ -37,6 +37,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
+         if (b.timed < b.window) return error.UntimedDraftWindow;
+         for (costs[0..b.window], b.costs[0..b.window]) |*ms, cost| ms.* = cost.ms;
+     }
++    if (b.count > 1) try absorbEarly(b, requests);
+     for (requests) |r| {
+         const slot = try b.slotFor(r.stream);
+         if (!b.draftsOwn(slot)) continue;
+@@ -47,7 +48,7 @@ pub fn draftFn(ptr: *anyopaque, requests: []const be.DraftRequest) anyerror!void
+         const g = &b.draft.?.generation;
+         const pool = mtl.objc.Pool.push();
+         defer pool.pop();
+-        if (b.count > 1) try absorbEarly(b, slot, r.rows orelse return error.NoKeptRows) else try b.settleRound();
++        if (b.count <= 1) try b.settleRound();
+         if (requests.len == 1) mtl.pass_metrics.begin(b.pass_profile, "lanes", b.window, mtl.clock.seconds);
+         b.dropTreeOf(slot);
+         const stands = b.runner.offsets[slot] + b.early[slot];
+@@ -104,23 +105,39 @@ fn proposeAll(b: *Metal, batch: []const Proposal, owners: []const u32) !void {
+     for (owners, trees[0..batch.len]) |slot, t| b.trees[slot] = t;
+ }
+ 
+-/// A slot's kept rows of a shared round's verify, gathered from its taps for its drafter before the keep.
+-fn absorbEarly(b: *Metal, slot: u32, path: []const u32) !void {
+-    if (b.early[slot] > 0) return error.AbsorbedTwice;
++/// A shared round's kept rows for each slot about to draft, gathered from its taps in one pass before the keep.
++fn absorbEarly(b: *Metal, requests: []const be.DraftRequest) !void {
+     const r = b.runner;
+-    const w = std.mem.indexOfScalar(u32, b.windows[0..b.count], slot) orelse return error.UnknownStream;
+-    const first = b.round.?.firsts[w];
+-    const rows = b.kept.slice(u32, path.len);
+-    for (rows, path) |*x, row| x.* = first + row;
++    const rows = b.kept.slice(u32, lb.batch_rows);
++    var n: usize = 0;
++    for (requests) |req| {
++        const slot = try b.slotFor(req.stream);
++        if (!b.draftsOwn(slot) or req.depth == 0) continue;
++        if (b.early[slot] > 0) return error.AbsorbedTwice;
++        const path = req.rows orelse return error.NoKeptRows;
++        const w = std.mem.indexOfScalar(u32, b.windows[0..b.count], slot) orelse return error.UnknownStream;
++        if (n + path.len > rows.len) return error.ShortTapScratch;
++        for (rows[n..][0..path.len], path) |*x, row| x.* = b.round.?.firsts[w] + row;
++        n += path.len;
++    }
++    if (n == 0) return;
+     const cb = r.model.queue.commandBuffer();
+     const e = cb.compute(.serial);
+-    try r.taps.accepted(r.model.glue, e, rows, .{ .buffer = b.kept }, .{ .buffer = b.gathered_taps.? });
++    try r.taps.accepted(r.model.glue, e, rows[0..n], .{ .buffer = b.kept }, .{ .buffer = b.gathered_taps.? });
+     e.end();
+     cb.commit();
+     cb.wait();
+     if (q.decode_round.gpuFailed(cb, "a taps gather")) return error.DraftTapGpuFailure;
+-    try b.ringOf(slot).?.absorb(b.gathered_taps.?, 0, @intCast(path.len));
+-    b.early[slot] = path.len;
++    var at: usize = 0;
++    for (requests) |req| {
++        const slot = try b.slotFor(req.stream);
++        if (!b.draftsOwn(slot) or req.depth == 0) continue;
++        const g = b.ringOf(slot).?;
++        const len: u32 = @intCast(req.rows.?.len);
++        try g.absorb(b.gathered_taps.?, at * g.stride, len);
++        b.early[slot] = len;
++        at += len;
++    }
+ }
+ 
+ /// Each held node's chance of landing: its own given its parent (e^own as the prior) times its parent's.
+-- 
+2.56.0
+

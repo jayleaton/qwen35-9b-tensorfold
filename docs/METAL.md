@@ -2,13 +2,13 @@
 
 | | |
 | --- | --- |
-| Engine | upstream TensorFold `6d0a128b0` + [`patches/metal/`](../patches/metal/) `0001`-`0049`, tree `767bd3b7d1846ff4973616e7d4287392fbb9e000` ([`config/metal/`](../config/metal/)), checked 2026-11-21 (`0001`-`0044`, tree `d33e2d93`, on 2026-11-20) |
+| Engine | upstream TensorFold `6d0a128b0` + [`patches/metal/`](../patches/metal/) `0001`-`0050`, tree `8676a04d431b1e3f2bf732b15378df3f3ff7eec1` ([`config/metal/`](../config/metal/)), checked 2026-11-21 (`0001`-`0044`, tree `d33e2d93`, on 2026-11-20) |
 | Studio | Mac Studio, M5 Ultra, 64-core GPU, 96 GiB; macOS 27.2, Xcode 27.2, Zig 0.17.0 |
 | MacBook Pro | M4 Pro, 20-core GPU (no tensor units), 24 GiB; macOS 26.3, Zig 0.17.0; Docker, Chrome and other apps left open, swap near full |
 | 16 GB Macs | the Studio with Metal's working set capped to a 16 GB Mac's (`TF_QWEN27_WORKING_SET_BYTES=11453251584`, 10.67 GiB), checked on the M4 Pro under the same cap; no physical 16 GB Mac |
 | Weights | `q9-q4` from [CONVERT](CONVERT.md): its four shards are byte-identical on the Studio, the MacBook and the DGX Spark |
 
-The `metal` series `0001`-`0044` serves the stock checkpoint unchanged; `0045`-`0049` add a reader and drafter for its MTP
+The `metal` series `0001`-`0044` serves the stock checkpoint unchanged; `0045`-`0050` add a reader and drafter for its MTP
 head ([MTP drafts](#mtp-drafts)). `tensorfold-native --version` prints 1.2.9.
 
 ## Build
@@ -134,18 +134,20 @@ on beside the head: a lone stream appends up to 48 copied tokens past the chain 
 off), and several chats share copy rounds. `0048` (copy_first, the idea of `cuda` `0031` on the MTP recipe) starts
 those copies at a 6-token match and, once a copy has landed whole, lets the next copy take the round without a chain;
 a copy that misses hands the round back to the head. `0049` makes the serving line say `MTP (...) + copies` when the
-lone loop copies and `MTP (...)` alone when it does not (`lane copies=off` names only the lane policy).
+lone loop copies and `MTP (...)` alone when it does not (`lane copies=off` names only the lane policy). With several
+chats, `0050` drafts their chains together: one frame a step for every chain still going, their attentions in one
+dispatch with the keys side by side under a per-row mask; a lone chain runs the same kernels as before.
 
 Studio, default profile, the speed rows above (drafted / `"draft": false`, tok/s; acceptance is accepted / drafted):
 
 | case | MTP | acceptance | copies only |
 | --- | --- | --- | --- |
-| 1K / 4K / 8K prompt | **228 / 115**, 197 / 113, 202 / 110 | 55%, 46%, 55% | 126 / 122, 120 / 120, 116 / 115 |
+| 1K / 4K / 8K prompt | **228 / 116**, 197 / 114, 203 / 109 | 55%, 46%, 55% | 126 / 122, 120 / 120, 116 / 115 |
 | 32K prompt | **171 / 102** | 47% | 108 / 107 |
-| re-quote / code edit | **1,012 / 115**, **452 / 116** | 63%, 64% | 763 / 121, 238 / 122 |
-| story | 214 / 115 | 61% | 123 / 122 |
-| 4 chats, 1K each (aggregate) | 303 / 305 | 69% | 316 / 352 |
-| 4 chats, 32K each (each chat's decode) | **140-183 / 88-100** | 57% | 94-107 / 29-100 |
+| re-quote / code edit | **1,015 / 116**, **451 / 116** | 63%, 64% | 763 / 121, 238 / 122 |
+| story | 213 / 115 | 61% | 123 / 122 |
+| 4 chats, 1K each (aggregate) | **364 / 306** | 69% | 316 / 352 |
+| 4 chats, 32K each (each chat's decode) | **140-185 / 88-100** | 57% | 94-107 / 29-100 |
 | startup | 11.6 s first launch of a build, 2.1 s after; 14.7 GiB wired (14.3 without) | | 11.6 s, 14.3 GiB |
 
 - All 9 cases token-identical drafted and plain, on every run (11 servers, chain settings swept). HumanEval+ and BFCL
@@ -161,6 +163,10 @@ Studio, default profile, the speed rows above (drafted / `"draft": false`, tok/s
   9.0 GiB wired with the head (8.5 without), 10.0 GiB footprint peak. HumanEval+ and BFCL (150-row subset) replies
   are identical to the run without it (164/164, 150/150), and the runs took 1,363 s and 680 s instead of 2,737 s and
   1,259 s.
+- Shared chains (`0050`): 4 chats x 1K 303 -> 364 tok/s against 306 plain (+19%; 360-388 over five runs on three servers). Before
+  it, four chats drafted each chain in turn, one frame a draft, and each single-row attention ran 16 threadgroups:
+  12.6 ms a round drafting against a 9 ms verify of all their rows (12 rows cost what 4 do). The one-chat rows did not
+  move. A cut of 0.3 drafted 10% more with the same speed: the shared drafts are not held back by the allocator.
 - copy_first (`0048`): re-quote 686 -> 1,012 tok/s, above copies alone (763); code edit 441 -> 452; every other row
   within run-to-run noise (4K 196-201 over six servers). The 6-token match alone gave re-quote 1,002 and code edit
   438; copy_first on every round instead of after a landed copy dropped code edit to 329. Acceptance reads lower
