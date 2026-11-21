@@ -21,11 +21,9 @@
   converter ([CONVERT](CONVERT.md)).
 - Upstream `main` without the series serves the converted tree at the same speed, but its NVMe tier skips saving long
   prompt states (`StagingFull`) and it refuses the EXL3 packs ([CUDA](CUDA.md#upstream-main)).
-- **MTP at 8 short chats at once.** A fresh server's first wave runs 18% above plain decode (351 against 298 tok/s
-  aggregate); later waves settle at 255-266, 11-17% below it. The lanes rule prices shared rounds as it runs and cuts
-  each stream's drafts to about half, while every round still pays the MTP layer. With 4K or 28K prompts 8 chats stay
-  ahead, and `PROFILE=batch` (16 chats) serves copy drafts only. Serve `MTP=0` for a server that only takes many
-  short chats at once ([CUDA](CUDA.md#mtp-drafting)).
+- **MTP does not pay at 16 short chats at once**: 468-476 tok/s aggregate against 493-494 with copy drafts alone, so
+  `PROFILE=batch` serves copy drafts only (`MTP=1` overrides). With 4K prompts, 16 chats draft ahead (106-107 against
+  102) ([CUDA](CUDA.md#mtp-drafting)).
 - **Startup takes 20 s with MTP** against 7 s with copy drafts only: the loader quantizes the BF16 head at load.
 
 ## RTX

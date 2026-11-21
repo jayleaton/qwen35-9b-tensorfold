@@ -5,7 +5,7 @@ series applied in order where it has one. The pin, the series and the resulting 
 
 | config | pin (`tensorfold.rev`) | series (`tensorfold.series` / `.patches`) | `tensorfold.tree` | devices |
 | --- | --- | --- | --- | --- |
-| `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0031` | `10b9ba30123fa33a2390c9f7944abdfa14d4ec98` | DGX Spark |
+| `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0032` | `5bf186b5ce7bf7fb9d42981738451cadff05c077` | DGX Spark |
 | `rtx` | same | `cuda:0022 rtx:0003` | `64ba7d4085cc4742c127af91fa196218b189bdbf` | 16 GB RTX |
 | `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0044` | `d33e2d93ea37f0b3ed1f208599a24ac00b3de16e` | Macs |
 | `hip` | `813ff4ccbf9d6610e991a96d53fda2b628f56347` | none | `f70d190f1d1bd65575a53f7eb06838c7acf97cfc` | Ally X ([HIP](HIP.md)) |
@@ -22,7 +22,7 @@ builds `libtfgrammar`.
 
 The series were written for [SenseNova-Loop-9B](https://github.com/jayleaton/sensenova-loop9b-tensorfold), a looped
 Qwen3.5-9B. They are reused byte for byte, so the `cuda` (through `0027`) and `metal` trees are ones already checked
-there. Two parts are added here: `rtx` `0003`, and `cuda` `0028`-`0031` for MTP drafting. Their loop and mHC code runs only for a checkpoint with `loop_settings`; stock
+there. Two parts are added here: `rtx` `0003`, and `cuda` `0028`-`0032` for MTP drafting. Their loop and mHC code runs only for a checkpoint with `loop_settings`; stock
 Qwen3.5-9B has none and takes the plain `qwen3_5` path. What the stock model uses from them:
 
 | patches | what stock Qwen3.5-9B gets | on upstream `main` (`727153cb3`) |
@@ -36,6 +36,7 @@ Qwen3.5-9B has none and takes the plain `qwen3_5` path. What the stock model use
 | `cuda` `0028`, `0029` | drafting with the checkpoint's own MTP head: upstream PR [#3582](https://github.com/ashhart/TensorFold/pull/3582) (its prerequisite and its dense MTP drafter), backported to the pin | `0028` landed as #4132; `0029` is an open PR |
 | `cuda` `0030` | the MTP head may sit beside the tree as `mtp.safetensors`, outside the index ([CONVERT](CONVERT.md#the-mtp-head)) | not there |
 | `cuda` `0031` | an MTP round leaves a stream with a copy ahead to the copy (`copy_first`), so re-quotes keep copy drafts' speed | not there |
+| `cuda` `0032` | with `TF_MTP_FIXED_HOLD=1`, a shared round prices the MTP hold as a fixed cost instead of a per-row slope, so 8 chats keep drafting deep after the first wave (off by default; the recipe's `serve.env` sets it) | not there |
 | `rtx` `0001`, `0002` | the EXL3 capability list compiles and keeps Qwen's decisions; `cuda.zig` back to 600 lines | not there |
 | `rtx` `0003` | new for this recipe, tools only: `exl3_attach_sensenova.py attach --method` records `exllamav3-native` calibration ([RTX](RTX.md#quantize)) | not there |
 | `cuda` `0008`, `metal` `0002`, `0004`, `0035`, `0037` | the converter, `tools/sensenova_loop_mlx.py` | no Qwen3.5 converter in `tools/` |

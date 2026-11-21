@@ -43,10 +43,11 @@ Copy drafts are on by default: a chat drafts from its own context (a file it is 
 engine verifies every drafted token, so replies are unchanged. They pay most on re-quotes and code edits.
 
 On the DGX Spark the default profile also drafts with the checkpoint's MTP head when the tree holds
-`mtp.safetensors` (`scripts/mtp-head.sh`): one chat decodes at 73-75 tok/s against 46-50, and 4 chats at 229 against
-168 aggregate. A stream with a copy ahead takes the copy first, so re-quotes and code edits stay at copy-draft speed or
-better (1,674 and 1,171 tok/s). `MTP=0 scripts/serve.sh` serves copy drafts only; `PROFILE=batch` never adds MTP,
-because many short chats at once are where it stops paying ([CUDA](CUDA.md#mtp-drafting)).
+`mtp.safetensors` (`scripts/mtp-head.sh`): one chat decodes at 72-73 tok/s against 47-50, 4 chats at 230 against 168
+aggregate, and 8 chats at 343-355 against 298. A stream with a copy ahead takes the copy first, so re-quotes and code
+edits stay at copy-draft speed or better (1,670 and 1,176 tok/s). `MTP=0 scripts/serve.sh` serves copy drafts only.
+`PROFILE=batch` does not add MTP: at 16 short chats it runs 4% below copy drafts alone (`MTP=1` adds it anyway;
+[CUDA](CUDA.md#mtp-drafting)).
 
 For batch work (benchmarks, many independent coding requests) serve 8 to 16 requests at once (`PROFILE=batch` on the
 Spark): replies are identical at every width. In the study (on SenseNova-Loop-9B, the same engine), 16 in flight

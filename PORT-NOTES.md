@@ -12,7 +12,7 @@
   - The tree's shards and `model.safetensors.index.json` are unchanged.
   - An engine without MTP never opens the file, because shards are found through the index. On the Spark, the
     shipped `cuda` build serves the tree with the file beside it: same banner (`copies only`), same speeds.
-- **Engine:** pin `038e4a278` with `cuda` `0001`-`0031`. The patches added for MTP:
+- **Engine:** pin `038e4a278` with `cuda` `0001`-`0032`. The patches added for MTP:
   - `0028`: upstream PR [#3582](https://github.com/ashhart/TensorFold/pull/3582)'s prerequisite (`478c6c4f2`,
     since landed as #4132).
   - `0029`: #3582's dense MTP drafter (`b15403929`), backported.
@@ -20,6 +20,10 @@
     `mtp.*` names.
   - `0031`: the MTP drafter declares `copy_first`, and lanes keep it beside context copies. A stream with a copy ahead
     takes the copy without an MTP pass, so re-quotes run faster than copy drafts alone instead of 13% slower.
+  - `0032`: with `TF_MTP_FIXED_HOLD=1` (set in `config/cuda/serve.env`), a shared round prices the MTP hold as a fixed
+    cost plus a row slope, fit over drafting rounds. Before it, lanes fit the hold as a per-row cost, drafted less each
+    round, and 8 short chats settled 11-17% below plain decode after the first wave; with it they stay at 338-362
+    against plain's 298. Off by default, so upstream behaviour is unchanged.
 - **Serving:** `scripts/serve.sh` adds `--drafter TREE` when the profile has a `.mtp` file and the tree holds
   `mtp.safetensors`. Only `config/cuda/serve.mtp` exists (the 8-chat default profile); `PROFILE=batch` stays copies
   only. `MTP=0` turns it off, and `MTP=1` asks for it on any profile. The loader quantizes the BF16 head to affine-4
@@ -30,14 +34,13 @@
 - **Pin: backport, not bump.** On the same GB10, #3582 rebased on main `4c616e63d` (`5b2be93de`) gives the same plain
   decode as pin `038e4a278` within 1% in every cell (47.2 vs 47.3 tok/s for 1 chat, 298 vs 298 for 8 chats), and the
   same MTP speeds. The plain-decode gain an RTX card sees on the new base is specific to that device.
-- **Known limit:** at 8 concurrent short chats, a server that has run a while drafts at 238-266 tok/s aggregate
-  against plain's 289-298 (two GB10s). The first wave on a fresh server reaches 350. With 4K or 28K prompts, MTP stays
-  ahead (+8-10% aggregate). The lanes rule's learned shared-round pricing is the cause ([KNOWN-ISSUES](docs/KNOWN-ISSUES.md)).
+- **Batch profile stays copies only:** at 16 short chats, MTP with fixed hold runs 468-476 tok/s aggregate against
+  493-494 for copy drafts alone; at 16 chats with 4K prompts it is 106-107 against 102.
 
 ## RTX (16 GB, EXL3 `st-6.0`)
 
-1. **Engine:** `cuda` `0028`-`0031` apply cleanly on the `rtx` series (`cuda` `0001`-`0022` + `rtx` `0001`-`0003`);
-   they become `rtx` `0004`-`0007`. Build for `SM=120`, then run the TensorFold tree's
+1. **Engine:** `cuda` `0028`-`0032` apply cleanly on the `rtx` series (`cuda` `0001`-`0022` + `rtx` `0001`-`0003`);
+   they become `rtx` `0004`-`0008`. Build for `SM=120`, then run the TensorFold tree's
    `python3 tools/pr_check.py --base <series tip>` and `zig build test-server-cpu`. `zig/dense_serving_test.zig`'s
    launch-sequence hash is the same on both series (`8085c4dc…`).
 2. **Head beside the pack:** `scripts/quantize-exl3.sh` writes no `mtp.*`. Run `scripts/mtp-head.sh BF16_DIR st-6.0`;

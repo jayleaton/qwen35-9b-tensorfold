@@ -1,9 +1,9 @@
 # DGX Spark (CUDA)
 
 Measured on DGX Spark-class GB10 machines (128 GB unified memory, Ubuntu 24.04, driver 580, CUDA 13.0, Zig 0.17.0) on
-2026-11-20 and 2026-11-21, with `config/cuda/`: upstream TensorFold `038e4a278` + `patches/cuda/` `0001`-`0031`, tree
-`10b9ba30123f`. Sections before [MTP drafting](#mtp-drafting) were measured with `0001`-`0027` (tree `9bac6ecbdef1`),
-copy drafts only; `0028`-`0031` add MTP drafting and leave those numbers unchanged when it is off.
+2026-11-20 and 2026-11-21, with `config/cuda/`: upstream TensorFold `038e4a278` + `patches/cuda/` `0001`-`0032`, tree
+`5bf186b5ce7b`. Sections before [MTP drafting](#mtp-drafting) were measured with `0001`-`0027` (tree `9bac6ecbdef1`),
+copy drafts only; `0028`-`0032` add MTP drafting and leave those numbers unchanged when it is off.
 
 ## Build
 
@@ -126,18 +126,21 @@ On by default in the default profile. The checkpoint carries one MTP layer (15 `
 build drafts with it through upstream PR [#3582](https://github.com/ashhart/TensorFold/pull/3582)'s dense MTP drafter,
 backported to the pin (`cuda` `0028`-`0029`). The head sits beside the tree as `mtp.safetensors`
 (`scripts/mtp-head.sh`, [CONVERT](CONVERT.md#the-mtp-head)) and is quantized to affine-4 tables at load (`0030`).
-A stream with a copy ahead takes the copy without an MTP pass (`0031`). `scripts/serve.sh` adds `--drafter TREE` when
+A stream with a copy ahead takes the copy without an MTP pass (`0031`), and a shared round prices the MTP hold as a
+fixed cost (`0032`, `TF_MTP_FIXED_HOLD=1` in `serve.env`; below). `scripts/serve.sh` adds `--drafter TREE` when
 the tree holds the head and the profile has a `.mtp` file (`config/cuda/serve.mtp`). `MTP=0` serves copy drafts
-only; `PROFILE=batch` stays copies only, because 16 short chats at once are where MTP does not pay (below).
+only; `PROFILE=batch` stays copies only, because 16 short chats at once are where MTP does not pay (below; `MTP=1`
+turns it on).
 
 ```
 qwen mtp: the checkpoint's bf16 MTP layer drafts as affine-4 tables quantized at load (drafts only)
 serving q9 at http://127.0.0.1:8090/v1 (sampling: temperature 1.0, top_p 0.95; drafts: MTP (q9-q4) + copies; ...)
 ```
 
-The recipe build (`0001`-`0031`) on one GB10, default profile, greedy, 256 tokens with `ignore_eos` and thinking off.
+The recipe build (`0001`-`0032`) on one GB10, default profile, greedy, 256 tokens with `ignore_eos` and thinking off.
 Every row's replies were compared, stream by stream, with the same prompts sent with `"draft": false`. Columns:
 - **MTP + copies:** the default;
+- **MTP, no `0032`:** `0001`-`0031`, the same as `0032` with `TF_MTP_FIXED_HOLD` unset;
 - **copies only:** the same tree without the head;
 - **plain:** `"draft": false`;
 - **previous recipe:** `0001`-`0027`, copy drafts.
@@ -145,22 +148,22 @@ Every row's replies were compared, stream by stream, with the same prompts sent 
 Chat rows show per-stream decode / aggregate tok/s. The aggregate counts the whole wave, including the other
 streams' prefill: prompts at 4K and 28K are not served from the prompt cache in this cell.
 
-| cell | MTP + copies | copies only | plain | previous recipe | replies |
-| --- | ---: | ---: | ---: | ---: | --- |
-| 1 chat, 52-token prompt | **73.5 / 73** | 50.2 / 50 | 47.0 / 47 | 50.4 / 50 | identical |
-| 4 chats, 52 tokens | **62.3 / 229** | 45.4 / 168 | 42.5 / 167 | 44.8 / 168 | identical |
-| 8 chats, 52 tokens, first wave | **49.6 / 351** | 38.4 / 298 | 38.4 / 299 | 38.5 / 299 | identical |
-| 8 chats, 52 tokens, later waves | 36.7-37.1 / 255-266 | | 38.5 / 298 | | identical |
-| 1 chat, 4,057-token prompt | **75.4 / 59** | 46.5 / 40 | 46.2 / 40 | 46.7 / 40 | identical |
-| 4 chats, 4,057 tokens | **55.1 / 92** | 36.5 / 78 | 36.4 / 77 | 36.6 / 78 | identical |
-| 8 chats, 4,057 tokens | **47.3 / 99** | 31.8 / 92 | 31.5 / 91 | 31.6 / 91 | identical |
-| 1 chat, 28,322-token prompt | **66.5 / 52** | 42.7 / 36 | 42.5 / 36 | 42.4 / 36 | identical |
-| 4 chats, 28,322 tokens | **42.9 / 72** | 29.2 / 63 | 29.2 / 61 | 29.4 / 62 | identical |
-| 8 chats, 28,322 tokens | **34.2 / 78** | 23.6 / 71 | 23.6 / 71 | 23.7 / 71 | identical |
-| re-quote a 6,000-character passage (512 tokens) | **1,674** | 1,517 | 47 | 1,519 | identical |
-| rename a variable through the same file | **1,171** | 908 | 47 | 906 | identical |
-| free prose | **81** | 47 | 47 | 47 | identical |
-| server ready | 20 s | 8 s | | 7 s | |
+| cell | MTP + copies | MTP, no `0032` | copies only | plain | previous recipe | replies |
+| --- | ---: | ---: | ---: | ---: | ---: | --- |
+| 1 chat, 52-token prompt | **72.6 / 72** | 73.5 / 73 | 50.2 / 50 | 47.0 / 47 | 50.4 / 50 | identical |
+| 4 chats, 52 tokens | **69.3 / 230** | 62.3 / 229 | 45.4 / 168 | 42.5 / 167 | 44.8 / 168 | identical |
+| 8 chats, 52 tokens, first wave | **51.0 / 349** | 49.6 / 351 | 38.4 / 298 | 38.4 / 299 | 38.5 / 299 | identical |
+| 8 chats, 52 tokens, waves 2-6 | **49.2-52.1 / 343-355** | 36.7-37.1 / 255-266 | | 38.5 / 298 | | identical |
+| 1 chat, 4,057-token prompt | **72.1 / 57** | 75.4 / 59 | 46.5 / 40 | 46.2 / 40 | 46.7 / 40 | identical |
+| 4 chats, 4,057 tokens | **55.2 / 92** | 55.1 / 92 | 36.5 / 78 | 36.4 / 77 | 36.6 / 78 | identical |
+| 8 chats, 4,057 tokens | **48.0 / 99** | 47.3 / 99 | 31.8 / 92 | 31.5 / 91 | 31.6 / 91 | identical |
+| 1 chat, 28,322-token prompt | **71.0 / 54** | 66.5 / 52 | 42.7 / 36 | 42.5 / 36 | 42.4 / 36 | identical |
+| 4 chats, 28,322 tokens | **46.2 / 73** | 42.9 / 72 | 29.2 / 63 | 29.2 / 61 | 29.4 / 62 | identical |
+| 8 chats, 28,322 tokens | **36.8 / 79** | 34.2 / 78 | 23.6 / 71 | 23.6 / 71 | 23.7 / 71 | identical |
+| re-quote a 6,000-character passage (512 tokens) | **1,670** | 1,674 | 1,517 | 47 | 1,519 | identical |
+| rename a variable through the same file | **1,176** | 1,171 | 908 | 47 | 906 | identical |
+| free prose | **80** | 81 | 47 | 47 | 47 | identical |
+| server ready | 20 s | 20 s | 8 s | | 7 s | |
 
 - **HumanEval+ 164** (budget 1024, `max_tokens` 1536, 16 at once, `PROFILE=batch` with `--drafter` added): 145/164 =
   88.4 in 308 s with MTP and 145/164 in 333 s with copy drafts only; all 164 replies token-identical. The MTP head's
@@ -177,10 +180,18 @@ streams' prefill: prompts at 4K and 28K are not served from the prompt cache in 
   - With `0031` they run 8-10% faster than copies only, and code edits gain 12% over MTP without it.
 - **Memory:** host MemAvailable fell by 53 GiB at peak, against 43-44 GiB with copy drafts. On unified memory this covers
   the drafter's ring and scratch at 8 streams and a 262,144-token window, and the 36 GiB reserve.
-- **8 short chats at once:** the first wave on a fresh server runs 18% above plain. Later waves settle 11-17% below it.
-  - The server's per-request log shows why: the lanes rule cuts each stream's drafts to about half once it has priced
-    shared rounds, while every round still pays the MTP layer's absorb.
-  - With 4K or 28K prompts, 8 chats stay ahead (+8-10% aggregate).
-  - The batch profile (16 chats) therefore keeps copy drafts only ([KNOWN-ISSUES](KNOWN-ISSUES.md)).
+- **Fixed hold (`0032`).** Lanes fit a drafted shared round's time over the plain point as a per-row cost. An MTP
+  hold costs about the same however few drafts it holds (a depth-1 hold for half of 8 streams took a round from 25 to
+  43 ms), so the fit's slope rose as drafts fell, the allocator cut drafts again, and 8 short chats settled at 255-266
+  tok/s after the first wave. With `TF_MTP_FIXED_HOLD=1`, drafting rounds' extra rows and time feed a decayed
+  least-squares fit: its intercept is the hold, a fixed cost of any drafting round, and its slope what a row costs at
+  this context. A round then drafts deep or not at all. Same binary, the variable off and on, interleaved on one GB10:
+  - 8 chats, 52 tokens, 12 waves each: 338-362 against 242-359 aggregate (plain 298).
+  - 1 chat at 4K -1.6%; 4 chats at 4K +1.1% per stream and +0.5% aggregate over 18 waves; 1 chat at 28K +5.5%;
+    4 chats at 28K +3.4% per stream, -0.6% aggregate. One chat never reaches the change (shared prices start at two
+    streams), so its spread is the server-to-server noise: up to 5% between two starts of the same arm.
+  - HumanEval+ in `PROFILE=batch` with MTP and fixed hold: the same 164 replies in 304 s.
+- **16 short chats at once** (`PROFILE=batch` with `MTP=1`): 468-476 against 493-494 aggregate with copy drafts alone
+  (plain 490), so the batch profile keeps copy drafts only. With 4K prompts 16 chats draft ahead, 107 against 102.
 - **Pin:** #3582 rebased onto upstream main `4c616e63d` (its head `5b2be93de`) ran on the same GB10 within 1% of this
   pin in every plain and MTP cell, with the same replies. The recipe keeps pin `038e4a278` with the backport.
