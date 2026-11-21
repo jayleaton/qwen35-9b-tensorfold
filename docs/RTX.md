@@ -72,7 +72,7 @@ refused (`1544 MiB passes the 1024 MiB budget`). Size the RAM cache to the longe
 On Linux or WSL2 with the CUDA 13 toolkit and Zig 0.17.0:
 
 ```bash
-XGRAMMAR=xgrammar scripts/build-engine.sh rtx engine-rtx    # SM=120 by default (RTX 50); set SM= for another card
+scripts/build-engine.sh rtx engine-rtx    # SM=120 by default (RTX 50); set SM= for another card; + libtfgrammar
 ```
 
 Without root, point it at a user-level toolkit with `NVCC=$CUDA_DIR/bin/nvcc`. The build took 6 minutes on the test

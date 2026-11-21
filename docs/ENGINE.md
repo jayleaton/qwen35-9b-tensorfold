@@ -5,7 +5,7 @@ series applied in order where it has one. The pin, the series and the resulting 
 
 | config | pin (`tensorfold.rev`) | series (`tensorfold.series` / `.patches`) | `tensorfold.tree` | devices |
 | --- | --- | --- | --- | --- |
-| `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0032` | `5bf186b5ce7bf7fb9d42981738451cadff05c077` | DGX Spark |
+| `cuda` | `038e4a27872eaa018adc67b1b5ddffd16820c498` | `cuda:0032` | `20a3fb0778161db76e0f9493b93e4c12ef91cd7d` | DGX Spark |
 | `rtx` | same | `cuda:0022 rtx:0003` | `64ba7d4085cc4742c127af91fa196218b189bdbf` | 16 GB RTX |
 | `metal` | `6d0a128b0cde35aa091bda933577cfced3519b8a` | `metal` `0001`-`0044` | `d33e2d93ea37f0b3ed1f208599a24ac00b3de16e` | Macs |
 | `hip` | `813ff4ccbf9d6610e991a96d53fda2b628f56347` | none | `f70d190f1d1bd65575a53f7eb06838c7acf97cfc` | Ally X ([HIP](HIP.md)) |
@@ -15,8 +15,9 @@ Every repo is `https://github.com/ashhart/TensorFold.git`. `scripts/fetch-engine
 pin, applies each `DIR:LAST` series in order with `git am` (each patch keeps its author; committer and dates are fixed,
 so every machine gets the same commits) and refuses any result whose tree differs from `tensorfold.tree`. SOURCE may
 be a local TensorFold checkout or a bundle that holds the pin (useful on a machine without GitHub access).
-`scripts/build-engine.sh` then builds `tensorfold-native` (and `tf-qwen35-cuda` on CUDA); with `XGRAMMAR=DIR` it also
-builds `libtfgrammar`.
+`scripts/build-engine.sh` then builds `tensorfold-native` (and `tf-qwen35-cuda` on CUDA). On `cuda` and `rtx` it also
+builds `libtfgrammar` from xgrammar v0.2.8 (cloned, or `XGRAMMAR=DIR`; `XGRAMMAR=none` skips it); on `metal`, with
+`XGRAMMAR=DIR`.
 
 ## Why these series for a stock checkpoint
 
@@ -36,7 +37,7 @@ Qwen3.5-9B has none and takes the plain `qwen3_5` path. What the stock model use
 | `cuda` `0028`, `0029` | drafting with the checkpoint's own MTP head: upstream PR [#3582](https://github.com/ashhart/TensorFold/pull/3582) (its prerequisite and its dense MTP drafter), backported to the pin | `0028` landed as #4132; `0029` is an open PR |
 | `cuda` `0030` | the MTP head may sit beside the tree as `mtp.safetensors`, outside the index ([CONVERT](CONVERT.md#the-mtp-head)) | not there |
 | `cuda` `0031` | an MTP round leaves a stream with a copy ahead to the copy (`copy_first`), so re-quotes keep copy drafts' speed | not there |
-| `cuda` `0032` | with `TF_MTP_FIXED_HOLD=1`, a shared round prices the MTP hold as a fixed cost instead of a per-row slope, so 8 chats keep drafting deep after the first wave (off by default; the recipe's `serve.env` sets it) | not there |
+| `cuda` `0032` | with `TF_MTP_FIXED_HOLD=1`, a greedy shared round prices the MTP hold as a fixed cost plus a row slope instead of a per-row slope alone, so 8 chats keep drafting deep after the first wave; sampled rounds keep the per-row price (off by default; the recipe's `serve.env` sets it) | not there |
 | `rtx` `0001`, `0002` | the EXL3 capability list compiles and keeps Qwen's decisions; `cuda.zig` back to 600 lines | not there |
 | `rtx` `0003` | new for this recipe, tools only: `exl3_attach_sensenova.py attach --method` records `exllamav3-native` calibration ([RTX](RTX.md#quantize)) | not there |
 | `cuda` `0008`, `metal` `0002`, `0004`, `0035`, `0037` | the converter, `tools/sensenova_loop_mlx.py` | no Qwen3.5 converter in `tools/` |

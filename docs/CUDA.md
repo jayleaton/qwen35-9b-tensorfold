@@ -2,19 +2,20 @@
 
 Measured on DGX Spark-class GB10 machines (128 GB unified memory, Ubuntu 24.04, driver 580, CUDA 13.0, Zig 0.17.0) on
 2026-11-20 and 2026-11-21, with `config/cuda/`: upstream TensorFold `038e4a278` + `patches/cuda/` `0001`-`0032`, tree
-`5bf186b5ce7b`. Sections before [MTP drafting](#mtp-drafting) were measured with `0001`-`0027` (tree `9bac6ecbdef1`),
+`20a3fb077816`. Sections before [MTP drafting](#mtp-drafting) were measured with `0001`-`0027` (tree `9bac6ecbdef1`),
 copy drafts only; `0028`-`0032` add MTP drafting and leave those numbers unchanged when it is off.
 
 ## Build
 
 ```bash
-XGRAMMAR=xgrammar scripts/build-engine.sh cuda engine-cuda   # NVCC defaults to /usr/local/cuda/bin/nvcc
+scripts/build-engine.sh cuda engine-cuda   # NVCC defaults to /usr/local/cuda/bin/nvcc
 ```
 
-`XGRAMMAR` names an xgrammar v0.2.8 checkout
-(`git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar xgrammar`) and builds
-`libtfgrammar` beside the server; leave it out and required or named tool calls get HTTP 400. On a machine without
-GitHub access, pass a TensorFold checkout or bundle holding the pin as the third argument.
+The build also writes `libtfgrammar` beside the server, from xgrammar v0.2.8 (commit `97787376faee`), which it clones
+into `engine-cuda/.xgrammar`; `tool_choice: "required"`, a named function and `response_format` need it.
+`XGRAMMAR=DIR` uses an existing v0.2.8 checkout instead, and `XGRAMMAR=none` skips the library (those requests then
+get HTTP 400). On a machine without GitHub access, pass a TensorFold checkout or bundle holding the pin as the third
+argument, and `XGRAMMAR=DIR`.
 
 The engine and `tf-qwen35-cuda` built in about 8 minutes on one Spark; `libtfgrammar` adds a few.
 `tensorfold-native --version` prints 1.2.9; your binary's sha256 will differ from ours with another build path or
@@ -150,20 +151,20 @@ streams' prefill: prompts at 4K and 28K are not served from the prompt cache in 
 
 | cell | MTP + copies | MTP, no `0032` | copies only | plain | previous recipe | replies |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| 1 chat, 52-token prompt | **72.6 / 72** | 73.5 / 73 | 50.2 / 50 | 47.0 / 47 | 50.4 / 50 | identical |
-| 4 chats, 52 tokens | **69.3 / 230** | 62.3 / 229 | 45.4 / 168 | 42.5 / 167 | 44.8 / 168 | identical |
-| 8 chats, 52 tokens, first wave | **51.0 / 349** | 49.6 / 351 | 38.4 / 298 | 38.4 / 299 | 38.5 / 299 | identical |
-| 8 chats, 52 tokens, waves 2-6 | **49.2-52.1 / 343-355** | 36.7-37.1 / 255-266 | | 38.5 / 298 | | identical |
-| 1 chat, 4,057-token prompt | **72.1 / 57** | 75.4 / 59 | 46.5 / 40 | 46.2 / 40 | 46.7 / 40 | identical |
-| 4 chats, 4,057 tokens | **55.2 / 92** | 55.1 / 92 | 36.5 / 78 | 36.4 / 77 | 36.6 / 78 | identical |
-| 8 chats, 4,057 tokens | **48.0 / 99** | 47.3 / 99 | 31.8 / 92 | 31.5 / 91 | 31.6 / 91 | identical |
-| 1 chat, 28,322-token prompt | **71.0 / 54** | 66.5 / 52 | 42.7 / 36 | 42.5 / 36 | 42.4 / 36 | identical |
-| 4 chats, 28,322 tokens | **46.2 / 73** | 42.9 / 72 | 29.2 / 63 | 29.2 / 61 | 29.4 / 62 | identical |
-| 8 chats, 28,322 tokens | **36.8 / 79** | 34.2 / 78 | 23.6 / 71 | 23.6 / 71 | 23.7 / 71 | identical |
-| re-quote a 6,000-character passage (512 tokens) | **1,670** | 1,674 | 1,517 | 47 | 1,519 | identical |
-| rename a variable through the same file | **1,176** | 1,171 | 908 | 47 | 906 | identical |
+| 1 chat, 52-token prompt | **78.2 / 77** | 73.5 / 73 | 50.2 / 50 | 47.0 / 47 | 50.4 / 50 | identical |
+| 4 chats, 52 tokens | **62.5 / 226** | 62.3 / 229 | 45.4 / 168 | 42.5 / 167 | 44.8 / 168 | identical |
+| 8 chats, 52 tokens, first wave | **49.0 / 358** | 49.6 / 351 | 38.4 / 298 | 38.4 / 299 | 38.5 / 299 | identical |
+| 8 chats, 52 tokens, waves 2-6 | **48.4-50.2 / 349-359** | 36.7-37.1 / 255-266 | | 38.5 / 298 | | identical |
+| 1 chat, 4,057-token prompt | **79.2 / 61** | 75.4 / 59 | 46.5 / 40 | 46.2 / 40 | 46.7 / 40 | identical |
+| 4 chats, 4,057 tokens | **53.4 / 92** | 55.1 / 92 | 36.5 / 78 | 36.4 / 77 | 36.6 / 78 | identical |
+| 8 chats, 4,057 tokens | **46.7 / 100** | 47.3 / 99 | 31.8 / 92 | 31.5 / 91 | 31.6 / 91 | identical |
+| 1 chat, 28,322-token prompt | **72.9 / 56** | 66.5 / 52 | 42.7 / 36 | 42.5 / 36 | 42.4 / 36 | identical |
+| 4 chats, 28,322 tokens | **46.7 / 72** | 42.9 / 72 | 29.2 / 63 | 29.2 / 61 | 29.4 / 62 | identical |
+| 8 chats, 28,322 tokens | **37.4 / 79** | 34.2 / 78 | 23.6 / 71 | 23.6 / 71 | 23.7 / 71 | identical |
+| re-quote a 6,000-character passage (512 tokens) | **1,668** | 1,674 | 1,517 | 47 | 1,519 | identical |
+| rename a variable through the same file | **1,177** | 1,171 | 908 | 47 | 906 | identical |
 | free prose | **80** | 81 | 47 | 47 | 47 | identical |
-| server ready | 20 s | 20 s | 8 s | | 7 s | |
+| server ready | 21 s | 20 s | 8 s | | 7 s | |
 
 - **HumanEval+ 164** (budget 1024, `max_tokens` 1536, 16 at once, `PROFILE=batch` with `--drafter` added): 145/164 =
   88.4 in 308 s with MTP and 145/164 in 333 s with copy drafts only; all 164 replies token-identical. The MTP head's
@@ -183,13 +184,22 @@ streams' prefill: prompts at 4K and 28K are not served from the prompt cache in 
 - **Fixed hold (`0032`).** Lanes fit a drafted shared round's time over the plain point as a per-row cost. An MTP
   hold costs about the same however few drafts it holds (a depth-1 hold for half of 8 streams took a round from 25 to
   43 ms), so the fit's slope rose as drafts fell, the allocator cut drafts again, and 8 short chats settled at 255-266
-  tok/s after the first wave. With `TF_MTP_FIXED_HOLD=1`, drafting rounds' extra rows and time feed a decayed
+  tok/s after the first wave. With `TF_MTP_FIXED_HOLD=1`, greedy drafting rounds' extra rows and time feed a decayed
   least-squares fit: its intercept is the hold, a fixed cost of any drafting round, and its slope what a row costs at
-  this context. A round then drafts deep or not at all. Same binary, the variable off and on, interleaved on one GB10:
-  - 8 chats, 52 tokens, 12 waves each: 338-362 against 242-359 aggregate (plain 298).
-  - 1 chat at 4K -1.6%; 4 chats at 4K +1.1% per stream and +0.5% aggregate over 18 waves; 1 chat at 28K +5.5%;
-    4 chats at 28K +3.4% per stream, -0.6% aggregate. One chat never reaches the change (shared prices start at two
-    streams), so its spread is the server-to-server noise: up to 5% between two starts of the same arm.
+  this context (until the rounds' rows spread enough to tell them apart, the per-row price stands). A greedy round
+  then drafts deep or not at all. Same binary, the variable off and on, interleaved on one GB10:
+  - 8 chats, 52 tokens, 12 waves each: 342-358 against 252-357 aggregate (plain 297).
+  - 4 chats at 4K: -4.7% per stream against the variable off, outside run-to-run noise of about ±3% (two starts of
+    the arm without it: 54.8-56.0 against 57.8-59.5 per stream); -1.8% aggregate, within it. Two earlier pairs, with a
+    build that differed only in sampled rounds, gave -2.3% and +1.1% (18 waves each). Against copy drafts alone at 4K
+    it is +46% per stream (53.4 against 36.5).
+  - 4 chats at 28K: -1.3% per stream, -0.2% aggregate.
+  - 1 chat: +2.8% at 4K, -3.8% at 28K. One chat never reaches the change (shared prices start at two streams); the
+    arm without it alone moved 66-75 tok/s between two starts at 28K.
+  - Sampled traffic (the server's default temperature 1.0) keeps the per-row price. Applied to sampled rounds too, the
+    fit drafted half as much on the soak's mixed requests (8 at once, tool calls, thinking, long prompts) and served
+    7-13% fewer in 10 minutes. With greedy rounds only, the same soak served 368 requests against 344 with the
+    variable off (0 failures), in line with `0031`'s 1,085 in 30 minutes.
   - HumanEval+ in `PROFILE=batch` with MTP and fixed hold: the same 164 replies in 304 s.
 - **16 short chats at once** (`PROFILE=batch` with `MTP=1`): 468-476 against 493-494 aggregate with copy drafts alone
   (plain 490), so the batch profile keeps copy drafts only. With 4K prompts 16 chats draft ahead, 107 against 102.

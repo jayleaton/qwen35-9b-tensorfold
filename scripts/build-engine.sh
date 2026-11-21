@@ -7,8 +7,10 @@
 #   scripts/build-engine.sh upstream DEST [SOURCE] upstream main with no patches: Metal on macOS, CUDA elsewhere
 #
 # NVCC=none builds the CUDA side's host code without kernel images (a source check on a machine without CUDA).
-# XGRAMMAR=DIR also builds libtfgrammar beside the server (required and named tool calls, response_format) from an
-# xgrammar v0.2.8 checkout: git clone --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar DIR
+# cuda and rtx also build libtfgrammar beside the server (tool_choice required or named, response_format) from xgrammar
+# v0.2.8: XGRAMMAR=DIR names a checkout, otherwise DEST/.xgrammar is cloned (git clone --branch v0.2.8
+# --recurse-submodules https://github.com/mlc-ai/xgrammar). XGRAMMAR=none skips it; those requests then get HTTP 400.
+# On metal, XGRAMMAR=DIR builds it the same way.
 set -euo pipefail
 backend=${1:?usage: scripts/build-engine.sh cuda|metal|rtx|upstream DEST [SOURCE]}
 dest=${2:?usage: scripts/build-engine.sh cuda|metal|rtx|upstream DEST [SOURCE]}
@@ -37,7 +39,25 @@ case "$backend" in
         ;;
     *) echo "no build for $backend" >&2; exit 2 ;;
 esac
-if [[ -n "${XGRAMMAR:-}" ]]; then
-    zig build grammar -Dxgrammar="$(cd "$XGRAMMAR" && pwd)"
+xgrammar_commit=97787376faee5ed8466cfad57c99855e4ce2f6aa # v0.2.8
+xg=${XGRAMMAR:-}
+if [[ -z "$xg" && ( "$backend" == cuda || "$backend" == rtx ) ]]; then
+    xg=$PWD/.xgrammar
+    if [[ ! -d "$xg/.git" ]]; then
+        git clone -q --branch v0.2.8 --recurse-submodules https://github.com/mlc-ai/xgrammar "$xg.part"
+        mv "$xg.part" "$xg"
+    fi
+    grep -qx '/.xgrammar' .git/info/exclude 2>/dev/null || echo '/.xgrammar' >> .git/info/exclude
+fi
+if [[ -n "$xg" && "$xg" != none ]]; then
+    got=$(git -C "$xg" rev-parse HEAD)
+    [[ "$got" == "$xgrammar_commit" ]] || { echo "$xg is xgrammar $got, not v0.2.8 ($xgrammar_commit)" >&2; exit 2; }
+    if [[ "$backend" == metal ]]; then
+        zig build grammar -Dcpu=apple_m1 -Dxgrammar="$(cd "$xg" && pwd)"
+    else
+        zig build grammar -Dxgrammar="$(cd "$xg" && pwd)"
+    fi
+    [[ -f zig-out/native/lib/libtfgrammar.so || -f zig-out/native/lib/libtfgrammar.dylib ]] ||
+        { echo "zig build grammar wrote no libtfgrammar under zig-out/native/lib" >&2; exit 2; }
 fi
 echo "built $dest/zig-out/native/bin/tensorfold-native"

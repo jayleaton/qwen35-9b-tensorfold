@@ -2,26 +2,29 @@ From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: Jay Leaton <58495321+jayleaton@users.noreply.github.com>
 Date: Sat, 21 Nov 2026 13:05:30 +0700
 Subject: [PATCH 32/32] qwen3_5: an MTP hold prices as a fixed cost of a
- drafted shared round (TF_MTP_FIXED_HOLD)
+ drafted greedy shared round (TF_MTP_FIXED_HOLD)
 
 Shared prices fit a drafted round's excess over the plain point as a per-row slope. An MTP hold costs
 about the same however few drafts it holds, so few rows made the slope steep, the allocator cut drafts,
-and the next fit was steeper: 8 short chats settled 11-17% below plain decode after the first wave.
-With hold_fixed, every drafting round's extra rows and residual feed a decayed least-squares fit: its
-intercept is a fixed cost of any drafting round (the hold), its slope what a row costs past the forward
-table at this context. Off by default (Model.hold_fixed).
+and the next fit was steeper: 8 short greedy chats settled 11-17% below plain decode after the first wave.
+With hold_fixed, every drafting greedy round's extra rows and residual feed a decayed least-squares fit:
+its intercept is a fixed cost of any drafting round (the hold), its slope what a row costs past the
+forward table at this context. Until the rounds' extra rows spread enough to separate the two (a
+variance of 4 rows squared), the per-row price stands. Sampled rounds keep the per-row price: on mixed
+sampled traffic the fit drafted about half as much and served 7-13% fewer requests. Off by default
+(Model.hold_fixed).
 ---
- zig/src/core/lanes/config.zig                 |  3 +++
- zig/src/core/lanes/depth.zig                  |  5 +++-
+ zig/src/core/lanes/config.zig                 |  3 ++
+ zig/src/core/lanes/depth.zig                  |  7 ++-
  zig/src/core/lanes/drafted.zig                |  1 +
  zig/src/core/lanes/drafter.zig                |  1 +
  zig/src/core/lanes/engine.zig                 |  1 +
- zig/src/core/lanes/shared_price.zig           | 22 +++++++++++++++++
- zig/src/core/lanes/shared_price_test.zig      | 24 +++++++++++++++++++
- zig/src/families/qwen3_5/cuda_mtp.zig         |  2 ++
+ zig/src/core/lanes/shared_price.zig           | 24 +++++++++
+ zig/src/core/lanes/shared_price_test.zig      | 50 +++++++++++++++++++
+ zig/src/families/qwen3_5/cuda_mtp.zig         |  2 +
  .../families/qwen3_5/cuda_mtp_contract.zig    |  2 +-
  zig/src/platform/environment.zig              |  1 +
- 10 files changed, 60 insertions(+), 2 deletions(-)
+ 10 files changed, 90 insertions(+), 2 deletions(-)
 
 diff --git a/zig/src/core/lanes/config.zig b/zig/src/core/lanes/config.zig
 index 97b110711..107179016 100644
@@ -52,24 +55,26 @@ index 97b110711..107179016 100644
              .head_trees = m.head_trees,
              .join_tail = m.join_tail,
 diff --git a/zig/src/core/lanes/depth.zig b/zig/src/core/lanes/depth.zig
-index 8d7c793b9..de1d9ed4a 100644
+index 8d7c793b9..5f6bb4323 100644
 --- a/zig/src/core/lanes/depth.zig
 +++ b/zig/src/core/lanes/depth.zig
 @@ -58,6 +58,7 @@ pub const Rule = struct {
      granted_depth: bool = false, // node_probabilities: a stream drafts its last grant plus draft_slack, lone ones too
      confidence_floor: ?f64 = null,
      plain_streams: u32 = 0, // a shared round with this many streams or more drafts none (0: off; a family's switch)
-+    hold_fixed: bool = false, // Model.hold_fixed: shared prices take a drafted round's excess as a fixed hold cost
++    hold_fixed: bool = false, // Model.hold_fixed: greedy shared prices fit a drafted round's excess as a fixed hold
      batch_rows: u32,
      batched_heads: bool = false, // one batch drafts every stream of a shared round (steps: the deepest stream's)
      row_cost: @import("row_cost.zig").RowCost = .{}, // what a row costs past shared_costs here, under k.learn_rows
-@@ -390,7 +391,9 @@ pub const Rule = struct {
+@@ -390,7 +391,11 @@ pub const Rule = struct {
      /// Independent plain price and the row slope from a plain/drafted pair, at this exact count and mode.
      pub fn sharedPrice(r: *const Rule, streams: usize, sampled: bool) ?@import("shared_price.zig").Price {
          if (streams < 2 or !r.plain_guard or r.confidence_floor != null) return null;
 -        var price = r.shared_price.price(streams, sampled, r.row_cost.extraMs(streams, sampled)) orelse return null;
 +        const row = r.row_cost.extraMs(streams, sampled);
-+        const priced = if (r.hold_fixed) r.shared_price.priceFixed(streams, sampled, row) else r.shared_price.price(streams, sampled, row);
++        // sampled rounds keep the per-row price: their draws make a drafted row's own cost (mixed traffic drafted less)
++        const fixed = r.hold_fixed and !sampled;
++        const priced = if (fixed) r.shared_price.priceFixed(streams, sampled, row) else r.shared_price.price(streams, sampled, row);
 +        var price = priced orelse return null;
          // The independent plain point owns the intercept; row learning owns the signed, noise-tested slope.
          if (r.k.learn_rows) price.row = r.row_cost.extraMs(streams, sampled);
@@ -111,10 +116,18 @@ index 50e7a73c4..cc657ec80 100644
                  .batched_heads = cfg.draft_streams,
              },
 diff --git a/zig/src/core/lanes/shared_price.zig b/zig/src/core/lanes/shared_price.zig
-index 8483ea6c6..f2a80880b 100644
+index 8483ea6c6..6e7a7a691 100644
 --- a/zig/src/core/lanes/shared_price.zig
 +++ b/zig/src/core/lanes/shared_price.zig
-@@ -12,7 +12,9 @@ const Bucket = struct {
+@@ -3,6 +3,7 @@ const std = @import("std");
+ const Allocator = std.mem.Allocator;
+ pub const every: u64 = 64;
+ pub const stale: u64 = 256;
++pub const min_spread: f64 = 4; // Model.hold_fixed: extra rows' variance (rows squared) that identifies a hold
+ const Point = struct { residual: f64, rows: f64, at: u64 };
+ const Bucket = struct {
+     streams: usize,
+@@ -12,7 +13,9 @@ const Bucket = struct {
      trials: u64 = 0, // completed all-plain trials, the first of them a warm-up
      plain: ?Point = null,
      draft: ?Point = null,
@@ -124,7 +137,7 @@ index 8483ea6c6..f2a80880b 100644
  pub const Price = struct { plain: f64, fixed: f64, row: f64 };
  
  pub const Prices = struct {
-@@ -61,6 +63,19 @@ pub const Prices = struct {
+@@ -61,6 +64,20 @@ pub const Prices = struct {
          } else if (plain and rows == streams) {
              blend(&b.plain, point);
          } else if (rows > streams) blend(&b.draft, point);
@@ -132,19 +145,20 @@ index 8483ea6c6..f2a80880b 100644
 +        if (!plain and !trial and rows >= streams) moment(&b.held, extra, residual);
 +    }
 +
-+    /// Model.hold_fixed: drafting rounds past the plain point, fit as a fixed hold plus a row slope of at least `row`.
++    /// Model.hold_fixed: a fixed hold and a row slope (at least `row`) once drafting rounds' rows spread, else `price`
 +    pub fn priceFixed(p: *const Prices, streams: usize, sampled: bool, row: f64) ?Price {
 +        const b = p.buckets.items[p.find(streams, sampled) orelse return null];
 +        const plain = b.plain orelse return null;
-+        const m = b.held orelse return .{ .plain = plain.residual, .fixed = plain.residual, .row = row };
-+        const spread = m.xx - m.x * m.x; // extra rows' variance: below a row's square, the slope is not measured
-+        const slope = if (spread >= 1) @max(row, (m.xy - m.x * m.y) / spread) else row;
++        const m = b.held orelse return p.price(streams, sampled, row);
++        const spread = m.xx - m.x * m.x; // extra rows' variance
++        if (!(spread >= min_spread)) return p.price(streams, sampled, row);
++        const slope = @max(row, (m.xy - m.x * m.y) / spread);
 +        const hold = @max(0, m.y - plain.residual - slope * m.x);
 +        return .{ .plain = plain.residual, .fixed = plain.residual + hold, .row = slope };
      }
  
      /// Until a plain round is measured, leave the existing allocator and its draft ranking in charge.
-@@ -75,6 +90,13 @@ pub const Prices = struct {
+@@ -75,6 +92,13 @@ pub const Prices = struct {
      }
  };
  
@@ -159,24 +173,24 @@ index 8483ea6c6..f2a80880b 100644
      if (to.*) |*old| {
          old.residual += 0.2 * (v.residual - old.residual);
 diff --git a/zig/src/core/lanes/shared_price_test.zig b/zig/src/core/lanes/shared_price_test.zig
-index 07c699164..4141f73ca 100644
+index 07c699164..6dd02aa2b 100644
 --- a/zig/src/core/lanes/shared_price_test.zig
 +++ b/zig/src/core/lanes/shared_price_test.zig
-@@ -209,3 +209,27 @@ test "shared prices: only measured plain timing excludes a preceding deferred dr
+@@ -209,3 +209,53 @@ test "shared prices: only measured plain timing excludes a preceding deferred dr
          try t.expectEqual(@as(usize, 0), e.rule.shared_price.buckets.items.len - @intFromBool(independent));
      };
  }
 +
-+test "shared prices: hold_fixed fits drafting rounds as a fixed hold plus a row slope, never below the given row" {
++test "shared prices: hold_fixed fits drafting rounds as a fixed hold plus a row slope once their rows spread" {
 +    var p: prices.Prices = .{};
 +    defer p.deinit(a);
 +    try t.expect(p.priceFixed(4, false, 0) == null);
 +    try p.observe(a, 4, 4, 2, false, true, false);
-+    try t.expectEqual(@as(f64, 2), p.priceFixed(4, false, 0.5).?.fixed); // no drafting round yet: no hold
-+    try p.observe(a, 4, 8, 10, false, false, false); // one point: no spread, the given row's slope
++    try p.observe(a, 4, 8, 10, false, false, false); // one drafting round: no spread, the per-row price stands
 +    const one = p.priceFixed(4, false, 0.5).?;
-+    try t.expectEqual(@as(f64, 6), one.fixed - one.plain); // 10 - 2 - 0.5 x 4 extra rows
-+    try t.expectEqual(@as(f64, 0.5), one.row);
++    const old = p.price(4, false, 0.5).?;
++    try t.expectEqual(old.fixed, one.fixed);
++    try t.expectEqual(old.row, one.row);
 +    // hold 6, then 1 ms a row: rounds with 0 and 8 extra rows, alternating, settle on that line
 +    var q: prices.Prices = .{};
 +    defer q.deinit(a);
@@ -189,6 +203,32 @@ index 07c699164..4141f73ca 100644
 +    try t.expectApproxEqAbs(@as(f64, 6), v.fixed - v.plain, 1e-6);
 +    try t.expectApproxEqAbs(@as(f64, 1), v.row, 1e-6);
 +    try t.expectApproxEqAbs(@as(f64, 1.75), q.price(4, false, 0).?.row, 1e-6); // without: the hold leans on the rows
++    // rounds whose extra rows barely move (0 and 1) do not identify a hold: the per-row price again
++    var r: prices.Prices = .{};
++    defer r.deinit(a);
++    try r.observe(a, 4, 4, 2, false, true, false);
++    for (0..200) |i| try r.observe(a, 4, 4 + @as(u64, i % 2), 9, false, false, false);
++    try t.expectEqual(r.price(4, false, 0).?.row, r.priceFixed(4, false, 0).?.row);
++}
++
++test "shared prices: hold_fixed reprices greedy rounds only; sampled rounds keep the per-row price" {
++    var table: @import("table.zig").Table = .{};
++    defer table.deinit(a);
++    for (1..17) |n| try table.put(a, @intCast(n), 10);
++    var r: @import("depth.zig").Rule = .{ .gpa = a, .prior = &.{0.8}, .most_drafts = 1, .family_costs = &table, .shared_costs = &table, .mtp_step_ms = 0, .plain_guard = true, .node_probabilities = false, .batch_rows = 16, .hold_fixed = true };
++    defer r.deinit();
++    for ([_]bool{ false, true }) |sampled| {
++        try r.observeShared(4, 4, 12, sampled, 0, true, false);
++        for (0..200) |i| {
++            const extra: u64 = if (i % 2 == 0) 0 else 8;
++            try r.observeShared(4, 4 + extra, 18 + @as(f64, @floatFromInt(extra)), sampled, 0, false, false);
++        }
++    }
++    const greedy = r.sharedPrice(4, false).?;
++    try t.expectApproxEqAbs(@as(f64, 6), greedy.fixed - greedy.plain, 1e-6); // the hold, fixed
++    const sampled = r.sharedPrice(4, true).?;
++    try t.expectEqual(sampled.plain, sampled.fixed); // per-row, as without hold_fixed
++    try t.expectApproxEqAbs(@as(f64, 1.75), sampled.row, 1e-6);
 +}
 diff --git a/zig/src/families/qwen3_5/cuda_mtp.zig b/zig/src/families/qwen3_5/cuda_mtp.zig
 index cfe9b5706..81e12f3db 100644

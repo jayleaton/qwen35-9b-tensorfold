@@ -20,10 +20,11 @@
     `mtp.*` names.
   - `0031`: the MTP drafter declares `copy_first`, and lanes keep it beside context copies. A stream with a copy ahead
     takes the copy without an MTP pass, so re-quotes run faster than copy drafts alone instead of 13% slower.
-  - `0032`: with `TF_MTP_FIXED_HOLD=1` (set in `config/cuda/serve.env`), a shared round prices the MTP hold as a fixed
-    cost plus a row slope, fit over drafting rounds. Before it, lanes fit the hold as a per-row cost, drafted less each
-    round, and 8 short chats settled 11-17% below plain decode after the first wave; with it they stay at 338-362
-    against plain's 298. Off by default, so upstream behaviour is unchanged.
+  - `0032`: with `TF_MTP_FIXED_HOLD=1` (set in `config/cuda/serve.env`), a greedy shared round prices the MTP hold
+    as a fixed cost plus a row slope, fit over drafting rounds. Before it, lanes fit the hold as a per-row cost,
+    drafted less each round, and 8 short greedy chats settled 11-17% below plain decode after the first wave; with it
+    they stay at 349-359 against plain's 297. Sampled rounds (the server's default temperature 1.0) keep the per-row
+    price: on mixed sampled traffic the fit drafted half as much and served 7-13% fewer requests. Off by default.
 - **Serving:** `scripts/serve.sh` adds `--drafter TREE` when the profile has a `.mtp` file and the tree holds
   `mtp.safetensors`. Only `config/cuda/serve.mtp` exists (the 8-chat default profile); `PROFILE=batch` stays copies
   only. `MTP=0` turns it off, and `MTP=1` asks for it on any profile. The loader quantizes the BF16 head to affine-4

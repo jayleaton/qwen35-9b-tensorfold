@@ -17,6 +17,6 @@
   Cornell RelaxML), the trellis-coded quantization EXL3 is built on. MIT and GPL-3.0 respectively; neither is included
   here.
 - [xgrammar](https://github.com/mlc-ai/xgrammar) v0.2.8 (Apache License 2.0): the grammar engine behind
-  `libtfgrammar`, built by the user for required and named tool calls.
+  `libtfgrammar`, which `scripts/build-engine.sh` builds for required and named tool calls.
 - [EvalPlus](https://github.com/evalplus/evalplus) (HumanEval+) and the
   [Berkeley Function Calling Leaderboard](https://github.com/ShishirPatil/gorilla) (BFCL v4): the quality checks.

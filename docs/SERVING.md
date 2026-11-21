@@ -43,9 +43,9 @@ Copy drafts are on by default: a chat drafts from its own context (a file it is 
 engine verifies every drafted token, so replies are unchanged. They pay most on re-quotes and code edits.
 
 On the DGX Spark the default profile also drafts with the checkpoint's MTP head when the tree holds
-`mtp.safetensors` (`scripts/mtp-head.sh`): one chat decodes at 72-73 tok/s against 47-50, 4 chats at 230 against 168
-aggregate, and 8 chats at 343-355 against 298. A stream with a copy ahead takes the copy first, so re-quotes and code
-edits stay at copy-draft speed or better (1,670 and 1,176 tok/s). `MTP=0 scripts/serve.sh` serves copy drafts only.
+`mtp.safetensors` (`scripts/mtp-head.sh`): one chat decodes at 72-79 tok/s against 47-50, 4 chats at 226 against 168
+aggregate, and 8 chats at 349-359 against 297. A stream with a copy ahead takes the copy first, so re-quotes and code
+edits stay at copy-draft speed or better (1,668 and 1,177 tok/s). `MTP=0 scripts/serve.sh` serves copy drafts only.
 `PROFILE=batch` does not add MTP: at 16 short chats it runs 4% below copy drafts alone (`MTP=1` adds it anyway;
 [CUDA](CUDA.md#mtp-drafting)).
 
@@ -56,7 +56,8 @@ brought thinking-on MBPP+ back within 16% of the thinking-off wall time.
 ## Tool calls
 
 `tool_choice: "required"`, a named function and `response_format` need `libtfgrammar` beside the server
-(`XGRAMMAR=DIR scripts/build-engine.sh ...`, from xgrammar v0.2.8); without it those requests get HTTP 400.
+(xgrammar v0.2.8; `scripts/build-engine.sh` builds it on `cuda` and `rtx`, and on `metal` with `XGRAMMAR=DIR`);
+without it those requests get HTTP 400.
 `tool_choice: "auto"` works without it.
 
 Don't add a "call the tool" system prompt with thinking off: it raises simple-call scores but turns refusals into

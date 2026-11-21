@@ -39,5 +39,8 @@ case "$mtp" in
         ;;
     *) echo "MTP must be 0 or 1" >&2; exit 2 ;;
 esac
+lib=$engine/zig-out/native/lib
+[[ -f "$lib/libtfgrammar.so" || -f "$lib/libtfgrammar.dylib" ]] || echo "warning: no libtfgrammar in $lib:" \
+    "tool_choice required or named and response_format get HTTP 400; rebuild with scripts/build-engine.sh" >&2
 exec "$engine/zig-out/native/bin/tensorfold-native" serve "$model" --name "${NAME:-q9}" --port "${PORT:-8090}" \
     "${profile[@]}" ${drafter[@]+"${drafter[@]}"} "$@"
