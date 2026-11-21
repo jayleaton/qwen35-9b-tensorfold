@@ -166,7 +166,8 @@ streams' prefill: prompts at 4K and 28K are not served from the prompt cache in 
   88.4 in 308 s with MTP and 145/164 in 333 s with copy drafts only; all 164 replies token-identical. The MTP head's
   drafts were accepted 70% of the time (112,123 of 160,038). 13 replies stop at the 1,536-token cap; each is a prefix
   of the reply in this page's earlier HumanEval+ runs, which ran past it. The shipped engine and this build both count
-  thinking inside `max_tokens` (checked on one request), so the gap to 89.0-89.6 lies outside drafting.
+  thinking inside `max_tokens` (checked on one request), and the shipped recipe (`0001`-`0027`, copy drafts) scores the
+  same 145/164 under this cap, with all 164 replies identical. The gap to 89.0-89.6 lies outside drafting.
 - **30-minute soak**, default profile with MTP, 8 at once (tool calls, streaming, chat, long prompts, code): 1,085
   requests, 0 failures. Server RSS 0.44 to 0.86 GiB; host MemAvailable 68.2 GiB at the start, 67.2 at its lowest,
   68.0 at the end.
